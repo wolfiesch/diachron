@@ -366,7 +366,7 @@ If you're still stuck:
 
 1. **Check the plan file** for known issues: `~/.claude/plans/partitioned-forging-muffin.md`
 
-2. **Report an issue** on GitHub: [github.com/wolfgangschoenberger/diachron/issues](https://github.com/wolfgangschoenberger/diachron/issues)
+2. **Report an issue** on GitHub: [github.com/wolfiesch/diachron/issues](https://github.com/wolfiesch/diachron/issues)
 
 3. **Include diagnostic info:**
 

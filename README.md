@@ -1,6 +1,6 @@
 # Diachron
 
-[![Version](https://img.shields.io/badge/version-0.1.0-blue.svg)](https://github.com/wolfgangschoenberger/diachron)
+[![Version](https://img.shields.io/badge/version-0.1.0-blue.svg)](https://github.com/wolfiesch/diachron)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey.svg)]()
 [![Claude Code](https://img.shields.io/badge/Claude%20Code-2.1%2B-orange.svg)]()
@@ -57,7 +57,7 @@ Diachron uses **Claude Code 2.1's hook architecture** to transparently capture e
 
 ```bash
 # Clone to Claude Code skills directory
-git clone https://github.com/wolfgangschoenberger/diachron ~/.claude/skills/diachron
+git clone https://github.com/wolfiesch/diachron ~/.claude/skills/diachron
 
 # Configure the hook (see INSTALL.md for details)
 ```

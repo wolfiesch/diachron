@@ -19,7 +19,7 @@ Complete guide to installing and configuring Diachron for Claude Code.
 
 ```bash
 # Clone directly into Claude Code skills directory
-git clone https://github.com/wolfgangschoenberger/diachron ~/.claude/skills/diachron
+git clone https://github.com/wolfiesch/diachron ~/.claude/skills/diachron
 
 # Verify installation
 ls ~/.claude/skills/diachron

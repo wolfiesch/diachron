@@ -7,9 +7,9 @@
     "name": "Wolfgang Schoenberger",
     "github": "wolfgangschoenberger"
   },
-  "repository": "https://github.com/wolfgangschoenberger/diachron",
-  "homepage": "https://github.com/wolfgangschoenberger/diachron#readme",
-  "bugs": "https://github.com/wolfgangschoenberger/diachron/issues",
+  "repository": "https://github.com/wolfiesch/diachron",
+  "homepage": "https://github.com/wolfiesch/diachron#readme",
+  "bugs": "https://github.com/wolfiesch/diachron/issues",
   "license": "MIT",
   "keywords": [
     "provenance",
