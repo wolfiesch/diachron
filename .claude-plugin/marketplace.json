@@ -1,0 +1,68 @@
+{
+  "name": "diachron",
+  "version": "0.1.0",
+  "displayName": "Diachron - Provenance Tracking",
+  "description": "Automatically track every code change made by AI assistants. Creates a queryable timeline of your project's evolution with git integration, semantic analysis, and AI summaries.",
+  "author": {
+    "name": "Wolfgang Schoenberger",
+    "github": "wolfgangschoenberger"
+  },
+  "repository": "https://github.com/wolfgangschoenberger/diachron",
+  "homepage": "https://github.com/wolfgangschoenberger/diachron#readme",
+  "bugs": "https://github.com/wolfgangschoenberger/diachron/issues",
+  "license": "MIT",
+  "keywords": [
+    "provenance",
+    "timeline",
+    "tracking",
+    "audit",
+    "history",
+    "git",
+    "ai-assisted",
+    "development"
+  ],
+  "categories": [
+    "Developer Tools",
+    "Productivity"
+  ],
+  "commands": [
+    {
+      "name": "diachron",
+      "description": "Initialize and manage Diachron provenance tracking",
+      "file": "diachron.md"
+    },
+    {
+      "name": "timeline",
+      "description": "View and query the change timeline",
+      "file": "timeline.md"
+    }
+  ],
+  "hooks": {
+    "PostToolUse": {
+      "matcher": "Write|Edit|Bash",
+      "description": "Captures file modifications to the timeline database",
+      "binary": "rust/target/release/diachron-hook",
+      "fallback": "lib/hook_capture.py"
+    }
+  },
+  "requirements": {
+    "claudeCode": ">=2.1.0",
+    "python": ">=3.8",
+    "platforms": ["darwin", "linux"]
+  },
+  "optionalDependencies": {
+    "openai": "AI-powered summaries via /timeline --summarize"
+  },
+  "files": [
+    "diachron.md",
+    "timeline.md",
+    "capture.md",
+    "README.md",
+    "INSTALL.md",
+    "TROUBLESHOOTING.md",
+    "lib/",
+    "rust/target/release/diachron-hook"
+  ],
+  "screenshots": [],
+  "changelog": "CHANGELOG.md"
+}

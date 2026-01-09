@@ -1,0 +1,31 @@
+# Rust build artifacts
+rust/target/
+rust/Cargo.lock
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+*.egg
+
+# Testing
+.pytest_cache/
+.benchmarks/
+.coverage
+htmlcov/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Runtime data (per-project)
+.diachron/
