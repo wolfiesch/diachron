@@ -265,7 +265,8 @@ build_rust_hook() {
             print_step "Testing pre-built Rust binary..."
             if echo '{}' | "$BINARY_PATH" 2>/dev/null; then
                 print_success "Pre-built binary works"
-                HOOK_CMD="~/.claude/skills/diachron/rust/target/release/diachron-hook"
+                # Use $HOME instead of ~ for proper expansion in settings.json
+                HOOK_CMD="$HOME/.claude/skills/diachron/rust/target/release/diachron-hook"
                 return 0
             else
                 print_warning "Pre-built binary failed, will attempt rebuild"
@@ -293,19 +294,26 @@ build_rust_hook() {
             # Clean build for consistency
             cargo clean 2>/dev/null || true
 
-            if cargo build --release 2>&1; then
+            # Capture build output for debugging if it fails
+            local build_output
+            if build_output=$(cargo build --release 2>&1); then
                 # Verify the build
                 if [ -f "$BINARY_PATH" ] && echo '{}' | "$BINARY_PATH" 2>/dev/null; then
                     print_success "Rust hook built successfully"
-                    HOOK_CMD="~/.claude/skills/diachron/rust/target/release/diachron-hook"
+                    # Use $HOME instead of ~ for proper expansion in settings.json
+                    HOOK_CMD="$HOME/.claude/skills/diachron/rust/target/release/diachron-hook"
                     HOOK_TYPE="rust"
                     return 0
                 else
                     print_warning "Rust build succeeded but binary test failed"
+                    print_info "Build output:"
+                    echo "$build_output"
                     HOOK_TYPE="python"
                 fi
             else
                 print_warning "Rust build failed, falling back to Python"
+                print_info "Build output:"
+                echo "$build_output"
                 HOOK_TYPE="python"
             fi
         fi
@@ -313,7 +321,8 @@ build_rust_hook() {
 
     if [[ "$HOOK_TYPE" == "python" ]]; then
         print_step "Configuring Python hook fallback..."
-        HOOK_CMD="python3 ~/.claude/skills/diachron/lib/hook_capture.py"
+        # Use $HOME instead of ~ for proper expansion in settings.json
+        HOOK_CMD="python3 $HOME/.claude/skills/diachron/lib/hook_capture.py"
 
         # Verify Python hook works
         if echo '{}' | python3 "$INSTALL_DIR/lib/hook_capture.py" 2>/dev/null; then

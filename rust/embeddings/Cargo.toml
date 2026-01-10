@@ -11,7 +11,8 @@ path = "src/lib.rs"
 [dependencies]
 thiserror = { workspace = true }
 tracing = { workspace = true }
-
-# Phase 2: Enable these when implementing embeddings
-# ort = { version = "2", features = ["download-binaries"] }
-# tokenizers = "0.15"
+ort = { workspace = true }
+tokenizers = { workspace = true }
+ndarray = { workspace = true }
+reqwest = { workspace = true }
+dirs = { workspace = true }

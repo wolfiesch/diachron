@@ -298,6 +298,8 @@ fn parse_bash_event(hook: &HookInput, project_root: &PathBuf) -> Option<CaptureE
         file_path: None,
         operation,
         diff_summary: detail,
+        // [*TO-DO:P2*] Raw input truncated to 500 chars with no indicator
+        // Consider: adding "..." suffix, increasing limit, or storing full command
         raw_input: Some(command.chars().take(500).collect()),
         metadata: None,
         git_commit_sha,
@@ -337,11 +339,8 @@ fn get_timestamp() -> (String, String) {
     let now = Local::now();
     let iso = now.format("%Y-%m-%dT%H:%M:%S%.3f").to_string();
 
-    let tz_name = if now.format("%Z").to_string().contains("DT") {
-        "PDT"
-    } else {
-        "PST"
-    };
+    // Use actual system timezone (e.g., PST, EST, UTC, etc.)
+    let tz_name = now.format("%Z").to_string();
 
     let display = now.format(&format!("%m/%d/%Y %I:%M %p {}", tz_name)).to_string();
     (iso, display)
@@ -372,6 +371,8 @@ fn get_or_create_session_id(diachron_dir: &PathBuf) -> String {
         }
     }
 
+    // [*TO-DO:P2*] Session ID collision risk - only 48 bits of entropy
+    // Consider using uuid crate or full timestamp + random component for better uniqueness
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -383,6 +384,7 @@ fn get_or_create_session_id(diachron_dir: &PathBuf) -> String {
 }
 
 fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
+    // Schema matches diachron_core::schema v3 for consistency
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS events (
             id INTEGER PRIMARY KEY,
@@ -398,13 +400,16 @@ fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
             git_commit_sha TEXT,
             parent_event_id INTEGER,
             metadata TEXT,
+            embedding BLOB,
+            project_path TEXT,
             FOREIGN KEY (parent_event_id) REFERENCES events(id)
         );
 
         CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events(timestamp);
         CREATE INDEX IF NOT EXISTS idx_events_file_path ON events(file_path);
         CREATE INDEX IF NOT EXISTS idx_events_session_id ON events(session_id);
-        CREATE INDEX IF NOT EXISTS idx_events_tool_name ON events(tool_name);"
+        CREATE INDEX IF NOT EXISTS idx_events_tool_name ON events(tool_name);
+        CREATE INDEX IF NOT EXISTS idx_events_project_path ON events(project_path);"
     )
 }
 

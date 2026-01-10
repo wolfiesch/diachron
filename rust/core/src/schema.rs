@@ -10,7 +10,7 @@ use rusqlite::Connection;
 use crate::error::Result;
 
 /// Current schema version
-pub const SCHEMA_VERSION: i32 = 2;
+pub const SCHEMA_VERSION: i32 = 3;
 
 /// Initialize or migrate the database schema
 pub fn init_schema(conn: &Connection) -> Result<()> {
@@ -21,6 +21,9 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
     }
     if version < 2 {
         migrate_v2(conn)?;
+    }
+    if version < 3 {
+        migrate_v3(conn)?;
     }
 
     Ok(())
@@ -123,6 +126,131 @@ fn migrate_v2(conn: &Connection) -> Result<()> {
 
     set_schema_version(conn, 2)?;
     Ok(())
+}
+
+/// V3: Add FTS triggers and project_path column
+fn migrate_v3(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "-- Add project_path column to events if not exists
+        ALTER TABLE events ADD COLUMN project_path TEXT;
+
+        -- Create FTS sync triggers for events
+        CREATE TRIGGER IF NOT EXISTS events_fts_insert AFTER INSERT ON events BEGIN
+            INSERT INTO events_fts(rowid, tool_name, operation, diff_summary, raw_input)
+            VALUES (new.id, new.tool_name, new.operation, new.diff_summary, new.raw_input);
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS events_fts_update AFTER UPDATE ON events BEGIN
+            DELETE FROM events_fts WHERE rowid = old.id;
+            INSERT INTO events_fts(rowid, tool_name, operation, diff_summary, raw_input)
+            VALUES (new.id, new.tool_name, new.operation, new.diff_summary, new.raw_input);
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS events_fts_delete AFTER DELETE ON events BEGIN
+            DELETE FROM events_fts WHERE rowid = old.id;
+        END;
+
+        -- Create FTS sync triggers for exchanges
+        CREATE TRIGGER IF NOT EXISTS exchanges_fts_insert AFTER INSERT ON exchanges BEGIN
+            INSERT INTO exchanges_fts(rowid, user_message, assistant_message, summary)
+            VALUES (new.rowid, new.user_message, new.assistant_message, new.summary);
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS exchanges_fts_update AFTER UPDATE ON exchanges BEGIN
+            DELETE FROM exchanges_fts WHERE rowid = old.rowid;
+            INSERT INTO exchanges_fts(rowid, user_message, assistant_message, summary)
+            VALUES (new.rowid, new.user_message, new.assistant_message, new.summary);
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS exchanges_fts_delete AFTER DELETE ON exchanges BEGIN
+            DELETE FROM exchanges_fts WHERE rowid = old.rowid;
+        END;
+
+        -- Create project_path index
+        CREATE INDEX IF NOT EXISTS idx_events_project_path ON events(project_path);",
+    )?;
+
+    set_schema_version(conn, 3)?;
+    Ok(())
+}
+
+/// Full-text search for events
+pub fn fts_search_events(
+    conn: &Connection,
+    query: &str,
+    limit: usize,
+) -> Result<Vec<FtsSearchResult>> {
+    let mut stmt = conn.prepare(
+        "SELECT e.id, e.timestamp, e.file_path, e.tool_name,
+                snippet(events_fts, 2, '<b>', '</b>', '...', 32) as snippet,
+                bm25(events_fts) as score
+         FROM events_fts
+         JOIN events e ON events_fts.rowid = e.id
+         WHERE events_fts MATCH ?1
+         ORDER BY bm25(events_fts)
+         LIMIT ?2",
+    )?;
+
+    let results = stmt
+        .query_map([query, &limit.to_string()], |row| {
+            Ok(FtsSearchResult {
+                id: row.get::<_, i64>(0)?.to_string(),
+                timestamp: row.get(1)?,
+                context: row.get::<_, Option<String>>(2)?,
+                source_type: "event".to_string(),
+                snippet: row.get(4)?,
+                score: row.get(5)?,
+            })
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    Ok(results)
+}
+
+/// Full-text search for exchanges
+pub fn fts_search_exchanges(
+    conn: &Connection,
+    query: &str,
+    limit: usize,
+) -> Result<Vec<FtsSearchResult>> {
+    let mut stmt = conn.prepare(
+        "SELECT e.id, e.timestamp, e.project,
+                snippet(exchanges_fts, 0, '<b>', '</b>', '...', 64) as snippet,
+                bm25(exchanges_fts) as score
+         FROM exchanges_fts
+         JOIN exchanges e ON exchanges_fts.rowid = e.rowid
+         WHERE exchanges_fts MATCH ?1
+         ORDER BY bm25(exchanges_fts)
+         LIMIT ?2",
+    )?;
+
+    let results = stmt
+        .query_map([query, &limit.to_string()], |row| {
+            Ok(FtsSearchResult {
+                id: row.get(0)?,
+                timestamp: row.get(1)?,
+                context: row.get::<_, Option<String>>(2)?,
+                source_type: "exchange".to_string(),
+                snippet: row.get(3)?,
+                score: row.get(4)?,
+            })
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    Ok(results)
+}
+
+/// Result from FTS search
+#[derive(Debug, Clone)]
+pub struct FtsSearchResult {
+    pub id: String,
+    pub timestamp: String,
+    pub context: Option<String>, // file_path for events, project for exchanges
+    pub source_type: String,     // "event" or "exchange"
+    pub snippet: String,
+    pub score: f64,
 }
 
 #[cfg(test)]

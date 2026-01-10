@@ -1,8 +1,11 @@
 //! Database operations for the daemon
 //!
 //! Handles event storage and queries for the unified database.
+//!
+//! Uses a mutex-wrapped connection for thread-safe access in async context.
 
 use std::path::PathBuf;
+use std::sync::Mutex;
 
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection};
@@ -11,9 +14,14 @@ use tracing::debug;
 use diachron_core::{CaptureEvent, StoredEvent};
 
 /// Database handle for the daemon
+///
+/// The connection is wrapped in a Mutex because rusqlite::Connection
+/// is not Send/Sync, but we need to share it across async tasks.
 pub struct Database {
     /// Path to the database file
     path: PathBuf,
+    /// Thread-safe connection wrapper
+    conn: Mutex<Connection>,
 }
 
 impl Database {
@@ -24,49 +32,82 @@ impl Database {
             std::fs::create_dir_all(parent).ok();
         }
 
-        // Initialize schema
+        // Open connection and initialize schema
         let conn = Connection::open(&path).context("Failed to open database")?;
         diachron_core::schema::init_schema(&conn).context("Failed to initialize schema")?;
 
-        Ok(Self { path })
+        Ok(Self {
+            path,
+            conn: Mutex::new(conn),
+        })
     }
 
-    /// Get a new connection (connections are not thread-safe)
-    fn conn(&self) -> rusqlite::Result<Connection> {
-        Connection::open(&self.path)
+    /// Get access to the connection (via mutex lock)
+    ///
+    /// Use this for FTS queries that need direct connection access.
+    pub fn with_conn<F, R>(&self, f: F) -> Result<R, rusqlite::Error>
+    where
+        F: FnOnce(&Connection) -> Result<R, rusqlite::Error>,
+    {
+        let conn = self.conn.lock().unwrap();
+        f(&conn)
     }
 
     /// Save a capture event to the database
+    ///
+    /// Parameters:
+    /// - `event`: The capture event data
+    /// - `session_id`: Optional session identifier
+    /// - `embedding`: Optional 384-dim embedding vector (stored as f32 blob)
     pub fn save_event(
         &self,
         event: &CaptureEvent,
         session_id: Option<&str>,
-        project_path: Option<&str>,
+        embedding: Option<&[f32]>,
     ) -> rusqlite::Result<i64> {
-        let conn = self.conn()?;
-
         let timestamp = chrono::Local::now();
         let timestamp_iso = timestamp.format("%Y-%m-%dT%H:%M:%S%.3f").to_string();
 
-        // Determine PST/PDT
-        let tz_name = if timestamp.format("%Z").to_string().contains("DT") {
-            "PDT"
-        } else {
-            "PST"
-        };
-        let timestamp_display = timestamp.format(&format!("%m/%d/%Y %I:%M %p {}", tz_name)).to_string();
+        // Use actual system timezone (e.g., PST, EST, UTC, etc.)
+        let tz_name = timestamp.format("%Z").to_string();
+        let timestamp_display =
+            timestamp.format(&format!("%m/%d/%Y %I:%M %p {}", tz_name)).to_string();
 
-        // Build metadata JSON
-        let metadata = serde_json::json!({
-            "command_category": event.command_category.as_ref().map(|c| c.as_str()),
-            "project_path": project_path,
+        // Build metadata JSON - preserve metadata from event (includes git_branch)
+        // and merge with any additional fields
+        let metadata = if let Some(ref existing_meta) = event.metadata {
+            // Try to parse and merge with existing metadata
+            if let Ok(mut meta) = serde_json::from_str::<serde_json::Value>(existing_meta) {
+                // Add command_category if not already present
+                if let Some(category) = event.command_category.as_ref() {
+                    if meta.get("command_category").is_none() {
+                        meta["command_category"] = serde_json::json!(category.as_str());
+                    }
+                }
+                meta
+            } else {
+                // Couldn't parse, create fresh metadata
+                serde_json::json!({
+                    "command_category": event.command_category.as_ref().map(|c| c.as_str()),
+                })
+            }
+        } else {
+            serde_json::json!({
+                "command_category": event.command_category.as_ref().map(|c| c.as_str()),
+            })
+        };
+
+        // Convert embedding to blob if present
+        let embedding_blob: Option<Vec<u8>> = embedding.map(|emb| {
+            emb.iter().flat_map(|f| f.to_le_bytes()).collect()
         });
 
+        let conn = self.conn.lock().unwrap();
         conn.execute(
             "INSERT INTO events (
                 timestamp, timestamp_display, session_id, tool_name, file_path,
-                operation, diff_summary, raw_input, git_commit_sha, metadata
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                operation, diff_summary, raw_input, git_commit_sha, metadata, embedding
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
                 timestamp_iso,
                 timestamp_display,
@@ -78,6 +119,7 @@ impl Database {
                 event.raw_input,
                 event.git_commit_sha,
                 metadata.to_string(),
+                embedding_blob,
             ],
         )?;
 
@@ -91,7 +133,7 @@ impl Database {
         file_filter: Option<&str>,
         limit: usize,
     ) -> rusqlite::Result<Vec<StoredEvent>> {
-        let conn = self.conn()?;
+        let conn = self.conn.lock().unwrap();
 
         // Build query dynamically
         let mut sql = String::from(
@@ -149,7 +191,7 @@ impl Database {
 
     /// Get event count
     pub fn event_count(&self) -> rusqlite::Result<u64> {
-        let conn = self.conn()?;
+        let conn = self.conn.lock().unwrap();
         let count: i64 = conn.query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))?;
         Ok(count as u64)
     }
@@ -222,6 +264,7 @@ mod tests {
             command_category: None,
         };
 
+        // Third parameter is now embedding (None = no embedding)
         let id = db.save_event(&event, Some("test-session"), None).unwrap();
         assert!(id > 0);
 

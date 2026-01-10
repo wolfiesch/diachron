@@ -15,3 +15,5 @@ chrono = { workspace = true }
 rusqlite = { workspace = true }
 thiserror = { workspace = true }
 dirs = { workspace = true }
+tracing = { workspace = true }
+usearch = { workspace = true }
