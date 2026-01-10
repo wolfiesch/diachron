@@ -1,0 +1,18 @@
+[package]
+name = "diachron-cli"
+version.workspace = true
+edition.workspace = true
+description = "Diachron CLI - thin client for daemon communication"
+
+[[bin]]
+name = "diachron"
+path = "src/main.rs"
+
+[dependencies]
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+interprocess = { workspace = true }
+dirs = { workspace = true }
+diachron-core = { path = "../core" }

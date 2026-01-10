@@ -1,0 +1,17 @@
+[package]
+name = "diachron-core"
+version.workspace = true
+edition.workspace = true
+description = "Core types and database operations for Diachron"
+
+[lib]
+name = "diachron_core"
+path = "src/lib.rs"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+rusqlite = { workspace = true }
+thiserror = { workspace = true }
+dirs = { workspace = true }
