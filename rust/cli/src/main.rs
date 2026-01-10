@@ -77,6 +77,14 @@ enum Commands {
         /// Filter by source: event, exchange, or all
         #[arg(long, value_name = "TYPE")]
         r#type: Option<String>,
+
+        /// Filter by time (e.g., "1h", "7d", "2024-01-01")
+        #[arg(long)]
+        since: Option<String>,
+
+        /// Filter by project name
+        #[arg(long)]
+        project: Option<String>,
     },
 
     /// Run diagnostics
@@ -97,6 +105,13 @@ enum MemoryCommands {
 
     /// Index pending conversations
     Index,
+
+    /// Summarize exchanges (requires Anthropic API key)
+    Summarize {
+        /// Maximum exchanges to summarize
+        #[arg(long, default_value = "100")]
+        limit: usize,
+    },
 
     /// Show memory statistics
     Status,
@@ -159,7 +174,10 @@ fn main() -> Result<()> {
                         for event in events {
                             println!(
                                 "{} {} {}",
-                                event.timestamp_display.as_deref().unwrap_or(&event.timestamp),
+                                event
+                                    .timestamp_display
+                                    .as_deref()
+                                    .unwrap_or(&event.timestamp),
                                 event.tool_name,
                                 event.file_path.as_deref().unwrap_or("-")
                             );
@@ -208,6 +226,8 @@ fn main() -> Result<()> {
                     query,
                     limit,
                     source_filter: Some(diachron_core::SearchSource::Exchange),
+                    since: None,
+                    project: None,
                 };
 
                 match send_message(&msg) {
@@ -255,6 +275,47 @@ fn main() -> Result<()> {
 
             MemoryCommands::Status => {
                 println!("Memory status: Not implemented yet");
+            }
+
+            MemoryCommands::Summarize { limit } => {
+                let msg = IpcMessage::SummarizeExchanges { limit };
+                // Use longer timeout for summarization (can take a while)
+                let path = socket_path();
+                let mut stream = std::os::unix::net::UnixStream::connect(&path)
+                    .context("Failed to connect to daemon")?;
+                stream.set_read_timeout(Some(Duration::from_secs(300)))?; // 5 min timeout
+                stream.set_write_timeout(Some(Duration::from_secs(5)))?;
+
+                let json = serde_json::to_string(&msg)? + "\n";
+                use std::io::Write;
+                stream.write_all(json.as_bytes())?;
+
+                let mut reader = std::io::BufReader::new(stream);
+                let mut response = String::new();
+                use std::io::BufRead;
+                reader.read_line(&mut response)?;
+
+                let response: IpcResponse = serde_json::from_str(&response)?;
+                match response {
+                    IpcResponse::SummarizeStats {
+                        summarized,
+                        skipped,
+                        errors,
+                    } => {
+                        println!("Summarization complete:");
+                        println!("  Summarized: {}", summarized);
+                        println!("  Skipped: {}", skipped);
+                        println!("  Errors: {}", errors);
+                    }
+                    IpcResponse::Error(e) => {
+                        eprintln!("Error: {}", e);
+                        std::process::exit(1);
+                    }
+                    _ => {
+                        eprintln!("Unexpected response");
+                        std::process::exit(1);
+                    }
+                }
             }
         },
 
@@ -359,7 +420,13 @@ fn main() -> Result<()> {
             }
         },
 
-        Commands::Search { query, limit, r#type } => {
+        Commands::Search {
+            query,
+            limit,
+            r#type,
+            since,
+            project,
+        } => {
             let source_filter = r#type.and_then(|t| match t.as_str() {
                 "event" => Some(diachron_core::SearchSource::Event),
                 "exchange" => Some(diachron_core::SearchSource::Exchange),
@@ -370,6 +437,8 @@ fn main() -> Result<()> {
                 query,
                 limit,
                 source_filter,
+                since,
+                project,
             };
 
             match send_message(&msg) {
@@ -378,9 +447,16 @@ fn main() -> Result<()> {
                         println!("No results found");
                     } else {
                         for result in results {
+                            // Format source as colored indicator
+                            let source_str = match result.source {
+                                diachron_core::SearchSource::Event => "Event",
+                                diachron_core::SearchSource::Exchange => "Exchange",
+                            };
+                            // Show project if available
+                            let proj_str = result.project.as_deref().unwrap_or("-");
                             println!(
-                                "[{:.2}] {:?} {} - {}",
-                                result.score, result.source, result.timestamp, result.snippet
+                                "[{:.2}] {} {} ({}) - {}",
+                                result.score, source_str, result.timestamp, proj_str, result.snippet
                             );
                         }
                     }
@@ -403,41 +479,87 @@ fn main() -> Result<()> {
 
             // Check socket
             let path = socket_path();
-            println!("Socket path: {:?}", path);
+            println!("Socket: {:?}", path);
             if path.exists() {
-                println!("Socket: ✓ exists");
+                println!("  Status: ✓ exists");
             } else {
-                println!("Socket: ✗ not found");
+                println!("  Status: ✗ not found");
             }
 
-            // Check daemon
-            println!("\nDaemon status:");
-            let msg = IpcMessage::Ping;
+            // Get comprehensive diagnostics from daemon
+            println!("\nDaemon:");
+            let msg = IpcMessage::DoctorInfo;
             match send_message(&msg) {
-                Ok(IpcResponse::Pong { uptime_secs, events_count }) => {
+                Ok(IpcResponse::Doctor(info)) => {
                     println!("  Status: ✓ running");
+                    println!("  Uptime: {}s", info.uptime_secs);
+                    println!("  Memory: {:.1} MB (RSS)", info.memory_rss_bytes as f64 / 1024.0 / 1024.0);
+
+                    println!("\nDatabase:");
+                    println!("  Events: {}", info.events_count);
+                    println!("  Exchanges: {}", info.exchanges_count);
+                    println!("  Size: {:.1} MB", info.database_size_bytes as f64 / 1024.0 / 1024.0);
+
+                    println!("\nVector Indexes:");
+                    println!("  Events: {} vectors ({:.1} KB)",
+                        info.events_index_count,
+                        info.events_index_size_bytes as f64 / 1024.0
+                    );
+                    println!("  Exchanges: {} vectors ({:.1} MB)",
+                        info.exchanges_index_count,
+                        info.exchanges_index_size_bytes as f64 / 1024.0 / 1024.0
+                    );
+
+                    println!("\nEmbedding Model:");
+                    if info.model_loaded {
+                        println!("  Status: ✓ loaded");
+                    } else {
+                        println!("  Status: ✗ not loaded");
+                    }
+                    if info.model_size_bytes > 0 {
+                        println!("  Size: {:.1} MB", info.model_size_bytes as f64 / 1024.0 / 1024.0);
+                    } else {
+                        println!("  Size: not found (run search to trigger download)");
+                    }
+                }
+                Ok(IpcResponse::Pong { uptime_secs, events_count }) => {
+                    // Fallback if daemon doesn't support DoctorInfo yet
+                    println!("  Status: ✓ running (legacy)");
                     println!("  Uptime: {}s", uptime_secs);
                     println!("  Events: {}", events_count);
+                }
+                Ok(IpcResponse::Error(e)) => {
+                    println!("  Status: ✗ error: {}", e);
                 }
                 Ok(_) => {
                     println!("  Status: ? unexpected response");
                 }
                 Err(e) => {
-                    println!("  Status: ✗ not running ({})", e);
+                    println!("  Status: ✗ not running");
+                    println!("  Error: {}", e);
+                    println!("  Hint: Start with 'diachron daemon start'");
                 }
             }
 
-            // Check v1 hook
+            // Check hook binary
             let hook_path = dirs::home_dir()
                 .map(|h| h.join(".claude/skills/diachron/rust/target/release/diachron-hook"));
             if let Some(path) = hook_path {
-                println!("\nV1 Hook:");
+                println!("\nHook Binary:");
                 if path.exists() {
-                    println!("  Binary: ✓ {:?}", path);
+                    if let Ok(meta) = std::fs::metadata(&path) {
+                        println!("  Status: ✓ {:?}", path);
+                        println!("  Size: {:.1} MB", meta.len() as f64 / 1024.0 / 1024.0);
+                    } else {
+                        println!("  Status: ✓ {:?}", path);
+                    }
                 } else {
-                    println!("  Binary: ✗ not found");
+                    println!("  Status: ✗ not found");
+                    println!("  Path: {:?}", path);
                 }
             }
+
+            println!("\n--- End Diagnostics ---");
         }
     }
 

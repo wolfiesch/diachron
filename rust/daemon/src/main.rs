@@ -23,12 +23,14 @@ mod db;
 mod handlers;
 mod indexer;
 mod server;
+mod summarization;
 
 pub use db::Database;
 use diachron_core::{IpcMessage, IpcResponse, VectorIndex, EMBEDDING_DIM};
 use diachron_embeddings::EmbeddingEngine;
+use summarization::Summarizer;
 
-/// Global state for the daemon
+/// Global state for the daemon.
 pub struct DaemonState {
     /// When the daemon started
     start_time: Instant,
@@ -53,9 +55,16 @@ pub struct DaemonState {
 
     /// Vector index for exchanges (conversations)
     pub exchanges_index: RwLock<VectorIndex>,
+
+    /// Summarizer for conversation exchanges (optional)
+    pub summarizer: Option<Summarizer>,
 }
 
 impl DaemonState {
+    /// Create a new daemon state instance.
+    ///
+    /// # Errors
+    /// Returns `anyhow::Error` if directories, database, or indexes fail to load.
     pub fn new() -> anyhow::Result<Self> {
         let diachron_home = dirs::home_dir()
             .map(|h| h.join(".diachron"))
@@ -76,7 +85,10 @@ impl DaemonState {
                 Some(engine)
             }
             Err(e) => {
-                warn!("Failed to load embedding engine: {}. Semantic search will be unavailable.", e);
+                warn!(
+                    "Failed to load embedding engine: {}. Semantic search will be unavailable.",
+                    e
+                );
                 warn!("Run 'diachron download-model' to download the embedding model.");
                 None
             }
@@ -117,6 +129,14 @@ impl DaemonState {
             VectorIndex::new(EMBEDDING_DIM)?
         };
 
+        // Initialize summarizer (optional - depends on API key availability)
+        let summarizer = Summarizer::new(&diachron_home);
+        if summarizer.is_available() {
+            info!("Summarizer available (API key found)");
+        } else {
+            info!("Summarizer unavailable (no API key). Set ANTHROPIC_API_KEY to enable.");
+        }
+
         Ok(Self {
             start_time: Instant::now(),
             events_count: AtomicU64::new(0),
@@ -126,38 +146,64 @@ impl DaemonState {
             embedding_engine: RwLock::new(embedding_engine),
             events_index: RwLock::new(events_index),
             exchanges_index: RwLock::new(exchanges_index),
+            summarizer: if summarizer.is_available() { Some(summarizer) } else { None },
         })
     }
 
+    /// Get uptime in seconds.
+    ///
+    /// # Returns
+    /// Number of seconds since daemon start.
     pub fn uptime_secs(&self) -> u64 {
         self.start_time.elapsed().as_secs()
     }
 
+    /// Get the number of events captured in this session.
+    ///
+    /// # Returns
+    /// Total events captured since startup.
     pub fn events_count(&self) -> u64 {
         self.events_count.load(Ordering::Relaxed)
     }
 
+    /// Increment the in-memory event counter.
     pub fn increment_events(&self) {
         self.events_count.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// Check whether a shutdown has been requested.
+    ///
+    /// # Returns
+    /// True if shutdown has been requested.
     pub fn should_shutdown(&self) -> bool {
         self.shutdown.load(Ordering::Relaxed)
     }
 
+    /// Request a graceful shutdown.
     pub fn request_shutdown(&self) {
         self.shutdown.store(true, Ordering::Relaxed);
     }
 
+    /// Get the path to the daemon socket.
+    ///
+    /// # Returns
+    /// Path to the Unix socket used by the daemon.
     pub fn socket_path(&self) -> PathBuf {
         self.diachron_home.join("diachron.sock")
     }
 
+    /// Get the path to the indexes directory.
+    ///
+    /// # Returns
+    /// Path to the vector index directory.
     pub fn indexes_path(&self) -> PathBuf {
         self.diachron_home.join("indexes")
     }
 
-    /// Save vector indexes to disk
+    /// Save vector indexes to disk.
+    ///
+    /// # Errors
+    /// Returns `anyhow::Error` if index persistence fails.
     pub fn save_indexes(&self) -> anyhow::Result<()> {
         let indexes_path = self.indexes_path();
 
@@ -187,7 +233,7 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive("diachrond=info".parse()?)
+                .add_directive("diachrond=info".parse()?),
         )
         .init();
 
@@ -206,10 +252,7 @@ async fn main() -> Result<()> {
 }
 
 /// Handle a single client connection
-async fn handle_client(
-    mut stream: tokio::net::UnixStream,
-    state: Arc<DaemonState>,
-) -> Result<()> {
+async fn handle_client(mut stream: tokio::net::UnixStream, state: Arc<DaemonState>) -> Result<()> {
     let (reader, mut writer) = stream.split();
     let mut reader = BufReader::new(reader);
     let mut line = String::new();

@@ -6,7 +6,7 @@ use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 
 use diachron_core::{
-    fts_search_events, fts_search_exchanges, IpcMessage, IpcResponse, SearchResult, SearchSource,
+    fts_search_events, fts_search_exchanges, DiagnosticInfo, IpcMessage, IpcResponse, SearchResult, SearchSource,
 };
 
 use crate::indexer::{
@@ -96,14 +96,22 @@ pub async fn handle_message(msg: IpcMessage, state: &Arc<DaemonState>) -> IpcRes
             query,
             limit,
             source_filter,
+            since,
+            project,
         } => {
             debug!(
-                "Search: {} (limit: {}, filter: {:?})",
-                query, limit, source_filter
+                "Search: {} (limit: {}, filter: {:?}, since: {:?}, project: {:?})",
+                query, limit, source_filter, since, project
             );
 
-            let results = hybrid_search(state, &query, limit, source_filter).await;
+            let results = hybrid_search(state, &query, limit, source_filter, since.as_deref(), project.as_deref()).await;
             IpcResponse::SearchResults(results)
+        }
+
+        IpcMessage::DoctorInfo => {
+            debug!("DoctorInfo requested");
+            let info = gather_diagnostic_info(state);
+            IpcResponse::Doctor(info)
         }
 
         IpcMessage::Timeline {
@@ -117,7 +125,10 @@ pub async fn handle_message(msg: IpcMessage, state: &Arc<DaemonState>) -> IpcRes
             );
 
             // Query events from database
-            match state.db.query_events(since.as_deref(), file_filter.as_deref(), limit) {
+            match state
+                .db
+                .query_events(since.as_deref(), file_filter.as_deref(), limit)
+            {
                 Ok(events) => {
                     debug!("Found {} events", events.len());
                     IpcResponse::Events(events)
@@ -225,20 +236,12 @@ pub async fn handle_message(msg: IpcMessage, state: &Arc<DaemonState>) -> IpcRes
                         }
 
                         // 8. Update checkpoint for this archive
-                        index_state.archives.insert(
-                            path_str.clone(),
-                            ArchiveState {
-                                last_line,
-                                mtime,
-                            },
-                        );
+                        index_state
+                            .archives
+                            .insert(path_str.clone(), ArchiveState { last_line, mtime });
                         archives_processed += 1;
 
-                        debug!(
-                            "Indexed {} exchanges from {}",
-                            exchanges.len(),
-                            path_str
-                        );
+                        debug!("Indexed {} exchanges from {}", exchanges.len(), path_str);
                     }
                     Err(e) => {
                         warn!("Failed to parse {}: {}", path_str, e);
@@ -265,6 +268,78 @@ pub async fn handle_message(msg: IpcMessage, state: &Arc<DaemonState>) -> IpcRes
             IpcResponse::IndexStats {
                 exchanges_indexed: total_indexed,
                 archives_processed,
+                errors,
+            }
+        }
+
+        IpcMessage::SummarizeExchanges { limit } => {
+            info!("Starting exchange summarization (limit: {})...", limit);
+
+            // Check if summarizer is available
+            let summarizer = match &state.summarizer {
+                Some(s) => s,
+                None => {
+                    return IpcResponse::Error(
+                        "Summarization unavailable. Set ANTHROPIC_API_KEY env var or add api_key to ~/.diachron/config.toml".to_string()
+                    );
+                }
+            };
+
+            // Get exchanges without summaries
+            let exchanges = match state.db.get_exchanges_without_summary(limit) {
+                Ok(e) => e,
+                Err(e) => {
+                    return IpcResponse::Error(format!("Database error: {}", e));
+                }
+            };
+
+            if exchanges.is_empty() {
+                info!("No exchanges need summarization");
+                return IpcResponse::SummarizeStats {
+                    summarized: 0,
+                    skipped: 0,
+                    errors: 0,
+                };
+            }
+
+            info!("Found {} exchanges to summarize", exchanges.len());
+
+            let mut summarized: u64 = 0;
+            let mut skipped: u64 = 0;
+            let mut errors: u64 = 0;
+
+            for (id, user_msg, assistant_msg) in exchanges {
+                // Skip if messages are too short to be meaningful
+                if user_msg.len() < 10 || assistant_msg.len() < 10 {
+                    skipped += 1;
+                    continue;
+                }
+
+                match summarizer.summarize(&user_msg, &assistant_msg) {
+                    Ok(summary) => {
+                        if let Err(e) = state.db.update_exchange_summary(&id, &summary) {
+                            warn!("Failed to save summary for {}: {}", id, e);
+                            errors += 1;
+                        } else {
+                            debug!("Summarized {}: {}", id, &summary[..summary.len().min(50)]);
+                            summarized += 1;
+                        }
+                    }
+                    Err(e) => {
+                        warn!("Failed to summarize {}: {}", id, e);
+                        errors += 1;
+                    }
+                }
+            }
+
+            info!(
+                "Summarization complete: {} summarized, {} skipped, {} errors",
+                summarized, skipped, errors
+            );
+
+            IpcResponse::SummarizeStats {
+                summarized,
+                skipped,
                 errors,
             }
         }
@@ -303,7 +378,13 @@ async fn hybrid_search(
     query: &str,
     limit: usize,
     source_filter: Option<SearchSource>,
+    since: Option<&str>,
+    project: Option<&str>,
 ) -> Vec<SearchResult> {
+    // Parse since filter to timestamp if provided
+    let since_timestamp = since.and_then(|s| parse_time_filter(s));
+
+    debug!("Hybrid search with since={:?}, project={:?}", since_timestamp, project);
     let mut results = Vec::new();
     let mut seen_ids = HashSet::new();
 
@@ -431,8 +512,35 @@ async fn hybrid_search(
         }
     }
 
-    // 3. Sort by score and limit
-    results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    // 3. Filter by since and project
+    if since_timestamp.is_some() || project.is_some() {
+        results.retain(|r| {
+            // Filter by timestamp if since is set
+            if let Some(ref since_ts) = since_timestamp {
+                if r.timestamp < *since_ts {
+                    return false;
+                }
+            }
+            // Filter by project if set
+            if let Some(proj) = project {
+                if let Some(ref result_proj) = r.project {
+                    if !result_proj.to_lowercase().contains(&proj.to_lowercase()) {
+                        return false;
+                    }
+                } else {
+                    return false; // No project info, exclude if filtering
+                }
+            }
+            true
+        });
+    }
+
+    // 4. Sort by score and limit
+    results.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     results.truncate(limit);
 
     debug!(
@@ -443,4 +551,124 @@ async fn hybrid_search(
     );
 
     results
+}
+
+/// Parse a time filter string into an ISO timestamp
+/// Supports: "1h", "2d", "7d", "1w", "30d", ISO dates, etc.
+fn parse_time_filter(filter: &str) -> Option<String> {
+    use chrono::{Duration, Utc};
+
+    let filter = filter.trim().to_lowercase();
+
+    // Handle relative time formats
+    let duration = if filter.ends_with('h') {
+        filter[..filter.len()-1].parse::<i64>().ok().map(Duration::hours)
+    } else if filter.ends_with('d') {
+        filter[..filter.len()-1].parse::<i64>().ok().map(Duration::days)
+    } else if filter.ends_with('w') {
+        filter[..filter.len()-1].parse::<i64>().ok().map(Duration::weeks)
+    } else if filter == "yesterday" {
+        Some(Duration::days(1))
+    } else if filter == "today" {
+        Some(Duration::hours(0)) // Current time
+    } else {
+        None
+    };
+
+    if let Some(dur) = duration {
+        let since = Utc::now() - dur;
+        return Some(since.format("%Y-%m-%dT%H:%M:%SZ").to_string());
+    }
+
+    // Try parsing as ISO date directly
+    if filter.contains('-') && filter.len() >= 10 {
+        // Assume it's already an ISO date, validate format roughly
+        if filter.chars().take(10).filter(|c| c.is_ascii_digit() || *c == '-').count() >= 10 {
+            return Some(if filter.len() == 10 {
+                format!("{}T00:00:00Z", filter)
+            } else {
+                filter.to_string()
+            });
+        }
+    }
+
+    None
+}
+
+/// Gather diagnostic information about the daemon state
+fn gather_diagnostic_info(state: &Arc<DaemonState>) -> DiagnosticInfo {
+    // Get counts from database
+    let events_count = state.db.event_count().unwrap_or(0);
+    let exchanges_count = state.db.exchange_count().unwrap_or(0);
+
+    // Get vector index counts
+    let events_index_count = state.events_index.read().map(|idx| idx.len()).unwrap_or(0);
+    let exchanges_index_count = state.exchanges_index.read().map(|idx| idx.len()).unwrap_or(0);
+
+    // Get file sizes
+    let db_path = state.diachron_home.join("diachron.db");
+    let database_size_bytes = std::fs::metadata(&db_path).map(|m| m.len()).unwrap_or(0);
+
+    let events_index_path = state.diachron_home.join("indexes/events.usearch");
+    let events_index_size_bytes = std::fs::metadata(&events_index_path).map(|m| m.len()).unwrap_or(0);
+
+    let exchanges_index_path = state.diachron_home.join("indexes/exchanges.usearch");
+    let exchanges_index_size_bytes = std::fs::metadata(&exchanges_index_path).map(|m| m.len()).unwrap_or(0);
+
+    // Check if model is loaded
+    let model_loaded = state.embedding_engine.read().map(|e| e.is_some()).unwrap_or(false);
+
+    // Get model file size
+    let model_path = state.diachron_home.join("models/all-MiniLM-L6-v2/model.onnx");
+    let model_size_bytes = std::fs::metadata(&model_path).map(|m| m.len()).unwrap_or(0);
+
+    // Get memory usage (platform-specific)
+    let memory_rss_bytes = get_process_memory_rss();
+
+    DiagnosticInfo {
+        uptime_secs: state.uptime_secs(),
+        events_count,
+        exchanges_count,
+        events_index_count,
+        exchanges_index_count,
+        database_size_bytes,
+        events_index_size_bytes,
+        exchanges_index_size_bytes,
+        model_loaded,
+        model_size_bytes,
+        memory_rss_bytes,
+    }
+}
+
+/// Get process RSS memory in bytes (platform-specific)
+#[cfg(target_os = "macos")]
+fn get_process_memory_rss() -> u64 {
+    use std::process::Command;
+
+    let pid = std::process::id();
+    let output = Command::new("ps")
+        .args(["-o", "rss=", "-p", &pid.to_string()])
+        .output()
+        .ok();
+
+    output
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .map(|kb| kb * 1024) // Convert KB to bytes
+        .unwrap_or(0)
+}
+
+#[cfg(target_os = "linux")]
+fn get_process_memory_rss() -> u64 {
+    // Read from /proc/self/statm
+    std::fs::read_to_string("/proc/self/statm")
+        .ok()
+        .and_then(|s| s.split_whitespace().nth(1)?.parse::<u64>().ok())
+        .map(|pages| pages * 4096) // Convert pages to bytes (assuming 4KB pages)
+        .unwrap_or(0)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn get_process_memory_rss() -> u64 {
+    0 // Unsupported platform
 }

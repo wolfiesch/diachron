@@ -17,7 +17,7 @@ use tracing::{debug, warn};
 
 use diachron_core::Exchange;
 
-/// Raw JSONL message from Claude Code archive
+/// Raw JSONL message from a Claude Code archive line.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RawMessage {
@@ -44,7 +44,7 @@ pub struct RawMessage {
     pub uuid: Option<String>,
 }
 
-/// Message content structure
+/// Message content structure for user/assistant messages.
 #[derive(Debug, Deserialize)]
 pub struct MessageContent {
     /// "user" or "assistant"
@@ -54,7 +54,7 @@ pub struct MessageContent {
     pub content: serde_json::Value,
 }
 
-/// Content block types in assistant messages
+/// Content block types in assistant messages.
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
 pub enum ContentBlock {
@@ -82,14 +82,14 @@ pub enum ContentBlock {
     Unknown,
 }
 
-/// Index state for incremental processing
+/// Index state for incremental processing.
 #[derive(Debug, Serialize, Deserialize, Default)]
 pub struct IndexState {
     /// Map from archive path to its state
     pub archives: HashMap<String, ArchiveState>,
 }
 
-/// State for a single archive
+/// State for a single archive.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ArchiveState {
     /// Last line number indexed (0-based)
@@ -99,7 +99,13 @@ pub struct ArchiveState {
 }
 
 impl IndexState {
-    /// Load index state from disk
+    /// Load index state from disk.
+    ///
+    /// # Arguments
+    /// - `path`: Path to the state JSON file.
+    ///
+    /// # Returns
+    /// Parsed `IndexState` or default state if missing or invalid.
     pub fn load(path: &Path) -> Self {
         match fs::read_to_string(path) {
             Ok(contents) => serde_json::from_str(&contents).unwrap_or_default(),
@@ -107,7 +113,13 @@ impl IndexState {
         }
     }
 
-    /// Save index state to disk
+    /// Save index state to disk.
+    ///
+    /// # Arguments
+    /// - `path`: Path to write the JSON state file.
+    ///
+    /// # Errors
+    /// Returns `anyhow::Error` if serialization or write fails.
     pub fn save(&self, path: &Path) -> anyhow::Result<()> {
         let contents = serde_json::to_string_pretty(self)?;
         fs::write(path, contents)?;
@@ -115,7 +127,13 @@ impl IndexState {
     }
 }
 
-/// Discover all JSONL archives in the Claude projects directory
+/// Discover all JSONL archives in the Claude projects directory.
+///
+/// # Arguments
+/// - `claude_dir`: Path to the Claude home directory.
+///
+/// # Returns
+/// Vector of archive paths discovered under `projects/`.
 pub fn discover_archives(claude_dir: &Path) -> Vec<PathBuf> {
     let projects_dir = claude_dir.join("projects");
     let mut archives = Vec::new();
@@ -245,13 +263,18 @@ fn extract_tool_calls(content: &serde_json::Value) -> Option<String> {
     }
 }
 
-/// Parse a single JSONL archive file
+/// Parse a single JSONL archive file.
 ///
-/// Returns exchanges found starting from `start_line`.
-pub fn parse_archive(
-    archive_path: &Path,
-    start_line: u64,
-) -> anyhow::Result<Vec<Exchange>> {
+/// # Arguments
+/// - `archive_path`: Path to the JSONL archive.
+/// - `start_line`: Line offset to resume parsing from.
+///
+/// # Returns
+/// Vector of exchanges found starting from `start_line`.
+///
+/// # Errors
+/// Returns `anyhow::Error` if the archive cannot be read.
+pub fn parse_archive(archive_path: &Path, start_line: u64) -> anyhow::Result<Vec<Exchange>> {
     let file = File::open(archive_path)?;
     let reader = BufReader::new(file);
 
@@ -272,7 +295,10 @@ pub fn parse_archive(
         let line = match line_result {
             Ok(l) => l,
             Err(e) => {
-                warn!("Failed to read line {} in {}: {}", line_num, archive_path_str, e);
+                warn!(
+                    "Failed to read line {} in {}: {}",
+                    line_num, archive_path_str, e
+                );
                 continue;
             }
         };
@@ -362,10 +388,17 @@ pub fn parse_archive(
     Ok(exchanges)
 }
 
-/// Safely truncate a string at a character boundary
+/// Safely truncate a string at a character boundary.
 ///
-/// UTF-8 strings can't be sliced at arbitrary byte positions - this function
+/// UTF-8 strings cannot be sliced at arbitrary byte positions; this function
 /// finds the nearest valid character boundary at or before the target length.
+///
+/// # Arguments
+/// - `s`: Input string to truncate.
+/// - `max_bytes`: Maximum byte length.
+///
+/// # Returns
+/// A string slice truncated at a valid UTF-8 boundary.
 pub fn safe_truncate(s: &str, max_bytes: usize) -> &str {
     if s.len() <= max_bytes {
         return s;
@@ -378,10 +411,16 @@ pub fn safe_truncate(s: &str, max_bytes: usize) -> &str {
     &s[..end]
 }
 
-/// Build embed text from an exchange for vector embedding
+/// Build embed text from an exchange for vector embedding.
 ///
 /// Combines user and assistant messages, truncating to stay within
 /// the embedding model's context limit (~2000 chars).
+///
+/// # Arguments
+/// - `exchange`: Exchange to convert into an embed string.
+///
+/// # Returns
+/// Concatenated user/assistant text with truncation applied.
 pub fn build_exchange_embed_text(exchange: &Exchange) -> String {
     // Truncate each to ~1000 chars for 2000 total
     let user_truncated = if exchange.user_message.len() > 1000 {
@@ -402,7 +441,13 @@ pub fn build_exchange_embed_text(exchange: &Exchange) -> String {
     )
 }
 
-/// Get modification time of a file as unix timestamp
+/// Get modification time of a file as unix timestamp.
+///
+/// # Arguments
+/// - `path`: Path to the file.
+///
+/// # Returns
+/// Unix timestamp in seconds, or 0 on failure.
 pub fn get_mtime(path: &Path) -> u64 {
     fs::metadata(path)
         .and_then(|m| m.modified())
@@ -508,8 +553,8 @@ mod tests {
         assert_eq!(safe_truncate("", 100), "");
 
         // Chinese characters (each is 3 bytes)
-        let chinese = "你好世界";  // 12 bytes total
-        assert_eq!(safe_truncate(chinese, 6), "你好");  // 2 chars = 6 bytes
-        assert_eq!(safe_truncate(chinese, 5), "你");    // backs up to char boundary
+        let chinese = "你好世界"; // 12 bytes total
+        assert_eq!(safe_truncate(chinese, 6), "你好"); // 2 chars = 6 bytes
+        assert_eq!(safe_truncate(chinese, 5), "你"); // backs up to char boundary
     }
 }

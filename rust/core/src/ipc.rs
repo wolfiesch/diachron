@@ -11,7 +11,10 @@ use std::time::Duration;
 
 use crate::{CaptureEvent, IpcMessage, IpcResponse};
 
-/// Default socket path
+/// Return the default Unix socket path.
+///
+/// # Returns
+/// Path to `~/.diachron/diachron.sock` (or `/tmp/.diachron/diachron.sock`).
 pub fn socket_path() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("/tmp"))
@@ -19,7 +22,7 @@ pub fn socket_path() -> PathBuf {
         .join("diachron.sock")
 }
 
-/// Error type for IPC operations
+/// Error type for IPC operations.
 #[derive(Debug)]
 pub enum IpcError {
     /// Daemon is not running (socket doesn't exist or connection refused)
@@ -51,7 +54,7 @@ impl std::fmt::Display for IpcError {
 
 impl std::error::Error for IpcError {}
 
-/// IPC client for communicating with the daemon
+/// IPC client for communicating with the daemon.
 pub struct IpcClient {
     socket_path: PathBuf,
     timeout: Duration,
@@ -64,7 +67,10 @@ impl Default for IpcClient {
 }
 
 impl IpcClient {
-    /// Create a new IPC client with default settings
+    /// Create a new IPC client with default settings.
+    ///
+    /// # Returns
+    /// Client configured with the default socket path and timeout.
     pub fn new() -> Self {
         Self {
             socket_path: socket_path(),
@@ -72,7 +78,13 @@ impl IpcClient {
         }
     }
 
-    /// Create a client with a custom socket path
+    /// Create a client with a custom socket path.
+    ///
+    /// # Arguments
+    /// - `socket_path`: Path to the Unix domain socket.
+    ///
+    /// # Returns
+    /// Client configured with the provided socket path.
     pub fn with_socket_path(socket_path: PathBuf) -> Self {
         Self {
             socket_path,
@@ -80,18 +92,37 @@ impl IpcClient {
         }
     }
 
-    /// Set the connection timeout
+    /// Set the connection timeout.
+    ///
+    /// # Arguments
+    /// - `timeout`: Timeout for socket read/write operations.
+    ///
+    /// # Returns
+    /// Client configured with the requested timeout.
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
         self
     }
 
-    /// Check if the daemon appears to be running (socket exists)
+    /// Check if the daemon appears to be running (socket exists).
+    ///
+    /// # Returns
+    /// True if the socket path exists, otherwise false.
     pub fn daemon_available(&self) -> bool {
         self.socket_path.exists()
     }
 
-    /// Send a message to the daemon and wait for a response
+    /// Send a message to the daemon and wait for a response.
+    ///
+    /// # Arguments
+    /// - `message`: IPC message to send.
+    ///
+    /// # Returns
+    /// Parsed `IpcResponse` from the daemon.
+    ///
+    /// # Errors
+    /// Returns `IpcError` if the daemon is unavailable, I/O fails, or the
+    /// response is invalid.
     pub fn send(&self, message: &IpcMessage) -> Result<IpcResponse, IpcError> {
         // Check if socket exists first (fast path)
         if !self.socket_path.exists() {
@@ -110,16 +141,13 @@ impl IpcClient {
         })?;
 
         // Set timeouts
-        stream
-            .set_read_timeout(Some(self.timeout))
-            .ok();
-        stream
-            .set_write_timeout(Some(self.timeout))
-            .ok();
+        stream.set_read_timeout(Some(self.timeout)).ok();
+        stream.set_write_timeout(Some(self.timeout)).ok();
 
         // Send message as JSON line
-        let json = serde_json::to_string(message)
-            .map_err(|e| IpcError::SendFailed(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))?;
+        let json = serde_json::to_string(message).map_err(|e| {
+            IpcError::SendFailed(std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+        })?;
 
         writeln!(stream, "{}", json).map_err(IpcError::SendFailed)?;
         stream.flush().map_err(IpcError::SendFailed)?;
@@ -143,7 +171,16 @@ impl IpcClient {
         Ok(response)
     }
 
-    /// Convenience method: Send a capture event to the daemon
+    /// Send a capture event to the daemon.
+    ///
+    /// # Arguments
+    /// - `event`: Capture event to persist.
+    ///
+    /// # Returns
+    /// Ok if the daemon acknowledges the event.
+    ///
+    /// # Errors
+    /// Returns `IpcError` if the daemon is unavailable or returns an error.
     pub fn capture(&self, event: CaptureEvent) -> Result<(), IpcError> {
         let response = self.send(&IpcMessage::Capture(event))?;
         match response {
@@ -153,31 +190,45 @@ impl IpcClient {
         }
     }
 
-    /// Convenience method: Ping the daemon
+    /// Ping the daemon to check availability.
+    ///
+    /// # Returns
+    /// Tuple of `(uptime_secs, events_count)` on success.
+    ///
+    /// # Errors
+    /// Returns `IpcError` if the daemon is unavailable or returns an error.
     pub fn ping(&self) -> Result<(u64, u64), IpcError> {
         let response = self.send(&IpcMessage::Ping)?;
         match response {
-            IpcResponse::Pong { uptime_secs, events_count } => Ok((uptime_secs, events_count)),
+            IpcResponse::Pong {
+                uptime_secs,
+                events_count,
+            } => Ok((uptime_secs, events_count)),
             IpcResponse::Error(msg) => Err(IpcError::DaemonError(msg)),
             _ => Err(IpcError::InvalidResponse("Unexpected response type".into())),
         }
     }
 }
 
-/// Simple function to send a capture event to the daemon
+/// Send a capture event to the daemon using a default client.
 ///
-/// Returns Ok(()) if the daemon handled the event, or an error if:
-/// - The daemon is not running
-/// - The connection failed
-/// - The daemon returned an error
+/// # Arguments
+/// - `event`: Capture event to persist.
 ///
-/// This is designed for use in the hook where we want to fall back
-/// to local database writes if the daemon is unavailable.
+/// # Returns
+/// Ok if the daemon handled the event.
+///
+/// # Errors
+/// Returns `IpcError` if the daemon is not running, the connection fails,
+/// or the daemon returns an error.
 pub fn send_to_daemon(event: CaptureEvent) -> Result<(), IpcError> {
     IpcClient::new().capture(event)
 }
 
-/// Check if the daemon is running
+/// Check if the daemon is running (socket exists).
+///
+/// # Returns
+/// True if the daemon socket path exists, otherwise false.
 pub fn is_daemon_running() -> bool {
     IpcClient::new().daemon_available()
 }

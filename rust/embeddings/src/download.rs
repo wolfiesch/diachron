@@ -10,11 +10,13 @@ use tracing::info;
 
 use crate::{EmbeddingError, Result};
 
-/// URLs for model files on HuggingFace Hub
-const MODEL_URL: &str = "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/onnx/model.onnx";
-const TOKENIZER_URL: &str = "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/tokenizer.json";
+/// URLs for model files on HuggingFace Hub.
+const MODEL_URL: &str =
+    "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/onnx/model.onnx";
+const TOKENIZER_URL: &str =
+    "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/tokenizer.json";
 
-/// Paths to model files
+/// Paths to model files.
 #[derive(Debug, Clone)]
 pub struct ModelPaths {
     pub model_path: PathBuf,
@@ -23,7 +25,10 @@ pub struct ModelPaths {
 }
 
 impl ModelPaths {
-    /// Get the default model directory
+    /// Get the default model directory.
+    ///
+    /// # Returns
+    /// Path to `~/.diachron/models/all-MiniLM-L6-v2`.
     pub fn default_dir() -> PathBuf {
         dirs::home_dir()
             .unwrap_or_else(|| PathBuf::from("/tmp"))
@@ -32,7 +37,10 @@ impl ModelPaths {
             .join("all-MiniLM-L6-v2")
     }
 
-    /// Create paths for the default directory
+    /// Create paths for the default directory.
+    ///
+    /// # Returns
+    /// Model paths for the default directory layout.
     pub fn default() -> Self {
         let model_dir = Self::default_dir();
         Self {
@@ -42,15 +50,22 @@ impl ModelPaths {
         }
     }
 
-    /// Check if all required files exist
+    /// Check if all required files exist.
+    ///
+    /// # Returns
+    /// True if both model and tokenizer files exist.
     pub fn exists(&self) -> bool {
         self.model_path.exists() && self.tokenizer_path.exists()
     }
 }
 
-/// Ensure the model exists, downloading if necessary
+/// Ensure the model exists, downloading if necessary.
 ///
-/// Returns the paths to the model files.
+/// # Returns
+/// Paths to the model files.
+///
+/// # Errors
+/// Returns `EmbeddingError` if download fails.
 pub fn ensure_model_exists() -> Result<ModelPaths> {
     let paths = ModelPaths::default();
 
@@ -89,7 +104,9 @@ fn download_file(url: &str, dest: &PathBuf) -> Result<()> {
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(300)) // 5 minute timeout for large files
         .build()
-        .map_err(|e| EmbeddingError::DownloadFailed(format!("Failed to create HTTP client: {}", e)))?;
+        .map_err(|e| {
+            EmbeddingError::DownloadFailed(format!("Failed to create HTTP client: {}", e))
+        })?;
 
     let response = client
         .get(url)
@@ -107,13 +124,11 @@ fn download_file(url: &str, dest: &PathBuf) -> Result<()> {
         .bytes()
         .map_err(|e| EmbeddingError::DownloadFailed(format!("Failed to read response: {}", e)))?;
 
-    let mut file = fs::File::create(dest).map_err(|e| {
-        EmbeddingError::DownloadFailed(format!("Failed to create file: {}", e))
-    })?;
+    let mut file = fs::File::create(dest)
+        .map_err(|e| EmbeddingError::DownloadFailed(format!("Failed to create file: {}", e)))?;
 
-    file.write_all(&bytes).map_err(|e| {
-        EmbeddingError::DownloadFailed(format!("Failed to write file: {}", e))
-    })?;
+    file.write_all(&bytes)
+        .map_err(|e| EmbeddingError::DownloadFailed(format!("Failed to write file: {}", e)))?;
 
     let size_mb = bytes.len() as f64 / 1024.0 / 1024.0;
     info!("Downloaded {} ({:.1} MB)", dest.display(), size_mb);
@@ -121,12 +136,18 @@ fn download_file(url: &str, dest: &PathBuf) -> Result<()> {
     Ok(())
 }
 
-/// Check if the model is downloaded
+/// Check if the model is downloaded.
+///
+/// # Returns
+/// True if the default model files exist.
 pub fn is_model_downloaded() -> bool {
     ModelPaths::default().exists()
 }
 
-/// Get the size of the downloaded model in bytes
+/// Get the size of the downloaded model in bytes.
+///
+/// # Returns
+/// Total bytes for model and tokenizer if they exist.
 pub fn model_size() -> Option<u64> {
     let paths = ModelPaths::default();
     if !paths.exists() {

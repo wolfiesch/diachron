@@ -2,6 +2,7 @@
 
 use thiserror::Error;
 
+/// Core error type for Diachron operations.
 #[derive(Error, Debug)]
 pub enum Error {
     #[error("Database error: {0}")]
@@ -26,4 +27,5 @@ pub enum Error {
     Other(String),
 }
 
+/// Result alias for core operations.
 pub type Result<T> = std::result::Result<T, Error>;

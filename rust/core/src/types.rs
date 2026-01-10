@@ -19,6 +19,10 @@ pub enum Operation {
 }
 
 impl Operation {
+    /// Return the lowercase string representation used for storage.
+    ///
+    /// # Returns
+    /// String slice for this operation variant.
     pub fn as_str(&self) -> &'static str {
         match self {
             Operation::Create => "create",
@@ -47,6 +51,10 @@ pub enum CommandCategory {
 }
 
 impl CommandCategory {
+    /// Return the lowercase string representation used for storage.
+    ///
+    /// # Returns
+    /// String slice for this command category.
     pub fn as_str(&self) -> &'static str {
         match self {
             CommandCategory::Git => "git",
@@ -60,7 +68,17 @@ impl CommandCategory {
     }
 }
 
-/// A captured code change event
+/// A captured code change event.
+///
+/// # Fields
+/// - `tool_name`: Tool name that produced the event (Write, Edit, Bash).
+/// - `file_path`: Optional file path affected by the event.
+/// - `operation`: Operation type for the change.
+/// - `diff_summary`: Short summary of the change.
+/// - `raw_input`: Raw tool input or command string.
+/// - `metadata`: Optional JSON metadata (branch, category, etc.).
+/// - `git_commit_sha`: Optional commit SHA.
+/// - `command_category`: Optional semantic category for bash commands.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CaptureEvent {
     pub tool_name: String,
@@ -73,7 +91,23 @@ pub struct CaptureEvent {
     pub command_category: Option<CommandCategory>,
 }
 
-/// A conversation exchange (for memory)
+/// A conversation exchange used for memory indexing.
+///
+/// # Fields
+/// - `id`: Stable identifier for the exchange.
+/// - `timestamp`: ISO timestamp string.
+/// - `project`: Optional project name.
+/// - `session_id`: Optional session identifier.
+/// - `user_message`: User message text.
+/// - `assistant_message`: Assistant message text.
+/// - `tool_calls`: Optional JSON array of tool names.
+/// - `archive_path`: Optional path to the source archive.
+/// - `line_start`: Optional starting line in the archive.
+/// - `line_end`: Optional ending line in the archive.
+/// - `embedding`: Optional embedding vector.
+/// - `summary`: Optional summary text.
+/// - `git_branch`: Optional git branch name.
+/// - `cwd`: Optional working directory.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Exchange {
     pub id: String,
@@ -92,7 +126,15 @@ pub struct Exchange {
     pub cwd: Option<String>,
 }
 
-/// Search result from vector or text search
+/// Search result from vector or text search.
+///
+/// # Fields
+/// - `id`: Identifier of the matched item.
+/// - `score`: Similarity score (higher is better).
+/// - `source`: Search source (event or exchange).
+/// - `snippet`: Highlighted snippet for display.
+/// - `timestamp`: Timestamp for the matched item.
+/// - `project`: Optional project name for context.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchResult {
     pub id: String,
@@ -103,6 +145,7 @@ pub struct SearchResult {
     pub project: Option<String>,
 }
 
+/// Source of a search result.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SearchSource {
@@ -110,7 +153,9 @@ pub enum SearchSource {
     Exchange,
 }
 
-/// IPC message between CLI and daemon
+/// IPC message between CLI and daemon.
+///
+/// Messages are serialized to JSON and sent over the Unix socket.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "payload")]
 pub enum IpcMessage {
@@ -122,6 +167,10 @@ pub enum IpcMessage {
         query: String,
         limit: usize,
         source_filter: Option<SearchSource>,
+        /// Filter by time (e.g., "1h", "7d", "2024-01-01")
+        since: Option<String>,
+        /// Filter by project name
+        project: Option<String>,
     },
 
     /// Get timeline events
@@ -134,6 +183,15 @@ pub enum IpcMessage {
     /// Index pending conversations
     IndexConversations,
 
+    /// Get diagnostic information
+    DoctorInfo,
+
+    /// Summarize exchanges without summaries
+    SummarizeExchanges {
+        /// Maximum exchanges to summarize (default: 100)
+        limit: usize,
+    },
+
     /// Health check
     Ping,
 
@@ -141,7 +199,7 @@ pub enum IpcMessage {
     Shutdown,
 }
 
-/// Response from daemon
+/// Response from daemon.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "payload")]
 pub enum IpcResponse {
@@ -149,16 +207,68 @@ pub enum IpcResponse {
     Error(String),
     SearchResults(Vec<SearchResult>),
     Events(Vec<StoredEvent>),
-    Pong { uptime_secs: u64, events_count: u64 },
+    Pong {
+        uptime_secs: u64,
+        events_count: u64,
+    },
     /// Result of indexing conversations
     IndexStats {
         exchanges_indexed: u64,
         archives_processed: u64,
         errors: u64,
     },
+    /// Diagnostic information
+    Doctor(DiagnosticInfo),
+    /// Result of summarization
+    SummarizeStats {
+        summarized: u64,
+        skipped: u64,
+        errors: u64,
+    },
 }
 
-/// Event as stored in database (with ID and timestamps)
+/// Diagnostic information for doctor command
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiagnosticInfo {
+    /// Daemon uptime in seconds
+    pub uptime_secs: u64,
+    /// Total events in database
+    pub events_count: u64,
+    /// Total exchanges in database
+    pub exchanges_count: u64,
+    /// Events vector index count
+    pub events_index_count: usize,
+    /// Exchanges vector index count
+    pub exchanges_index_count: usize,
+    /// Database file size in bytes
+    pub database_size_bytes: u64,
+    /// Events index file size in bytes
+    pub events_index_size_bytes: u64,
+    /// Exchanges index file size in bytes
+    pub exchanges_index_size_bytes: u64,
+    /// Whether embedding model is loaded
+    pub model_loaded: bool,
+    /// Model file size in bytes (0 if not found)
+    pub model_size_bytes: u64,
+    /// Daemon memory usage in bytes (RSS)
+    pub memory_rss_bytes: u64,
+}
+
+/// Event as stored in the database (with ID and timestamps).
+///
+/// # Fields
+/// - `id`: Database row ID.
+/// - `timestamp`: ISO timestamp string.
+/// - `timestamp_display`: Optional human-friendly timestamp.
+/// - `session_id`: Optional session identifier.
+/// - `tool_name`: Tool name that produced the event.
+/// - `file_path`: Optional file path affected by the event.
+/// - `operation`: Optional operation string.
+/// - `diff_summary`: Optional diff summary.
+/// - `raw_input`: Optional raw tool input.
+/// - `ai_summary`: Optional AI summary.
+/// - `git_commit_sha`: Optional commit SHA.
+/// - `metadata`: Optional JSON metadata string.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoredEvent {
     pub id: i64,

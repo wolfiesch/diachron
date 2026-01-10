@@ -23,3 +23,5 @@ dirs = { workspace = true }
 twox-hash = "2"
 diachron-core = { path = "../core" }
 diachron-embeddings = { path = "../embeddings" }
+reqwest = { workspace = true }
+toml = "0.8"

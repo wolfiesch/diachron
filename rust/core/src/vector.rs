@@ -12,9 +12,10 @@ use thiserror::Error;
 use tracing::{debug, info};
 use usearch::{Index, IndexOptions, MetricKind, ScalarKind};
 
-/// Embedding dimension (384 for all-MiniLM-L6-v2)
+/// Embedding dimension (384 for all-MiniLM-L6-v2).
 pub const EMBEDDING_DIM: usize = 384;
 
+/// Error type for vector index operations.
 #[derive(Error, Debug)]
 pub enum VectorError {
     #[error("Index error: {0}")]
@@ -30,9 +31,10 @@ pub enum VectorError {
     NotFound(String),
 }
 
+/// Result alias for vector index operations.
 pub type Result<T> = std::result::Result<T, VectorError>;
 
-/// Search result from vector index
+/// Search result from vector index.
 #[derive(Debug, Clone)]
 pub struct VectorSearchResult {
     /// The ID of the matching item
@@ -41,7 +43,9 @@ pub struct VectorSearchResult {
     pub score: f32,
 }
 
-/// HNSW-based vector index
+/// HNSW-based vector index.
+///
+/// Maintains an in-memory HNSW graph and ID mappings for persistence.
 pub struct VectorIndex {
     index: Index,
     /// Map from usearch internal key to our string ID
@@ -55,16 +59,25 @@ pub struct VectorIndex {
 }
 
 impl VectorIndex {
-    /// Create a new empty vector index
+    /// Create a new empty vector index.
+    ///
+    /// # Arguments
+    /// - `dim`: Embedding dimension for vectors in the index.
+    ///
+    /// # Returns
+    /// Empty vector index configured for the provided dimension.
+    ///
+    /// # Errors
+    /// Returns `VectorError` if the index cannot be initialized.
     pub fn new(dim: usize) -> Result<Self> {
         let options = IndexOptions {
             dimensions: dim,
             metric: MetricKind::Cos, // Cosine similarity
             quantization: ScalarKind::F32,
-            connectivity: 16,       // M parameter for HNSW
-            expansion_add: 128,     // ef_construction
-            expansion_search: 64,   // ef_search
-            multi: false,           // Single vector per key
+            connectivity: 16,     // M parameter for HNSW
+            expansion_add: 128,   // ef_construction
+            expansion_search: 64, // ef_search
+            multi: false,         // Single vector per key
         };
 
         let index = Index::new(&options).map_err(|e| VectorError::IndexError(e.to_string()))?;
@@ -78,14 +91,28 @@ impl VectorIndex {
         })
     }
 
-    /// Create a new vector index with default dimension (384)
+    /// Create a new vector index with the default dimension (384).
+    ///
+    /// # Returns
+    /// Empty vector index configured for `EMBEDDING_DIM`.
+    ///
+    /// # Errors
+    /// Returns `VectorError` if the index cannot be initialized.
     pub fn new_default() -> Result<Self> {
         Self::new(EMBEDDING_DIM)
     }
 
-    /// Add a vector with the given ID
+    /// Add a vector with the given ID.
     ///
     /// If the ID already exists, it will be updated.
+    ///
+    /// # Arguments
+    /// - `id`: Application-level identifier for the embedding.
+    /// - `embedding`: Embedding vector with length equal to `dim`.
+    ///
+    /// # Errors
+    /// Returns `VectorError` if the embedding size is incorrect or the
+    /// underlying index update fails.
     pub fn add(&mut self, id: &str, embedding: &[f32]) -> Result<()> {
         assert_eq!(
             embedding.len(),
@@ -111,9 +138,9 @@ impl VectorIndex {
         if current_capacity <= self.id_map.len() {
             // Reserve more capacity (double or at least 16)
             let new_capacity = (current_capacity * 2).max(16);
-            self.index
-                .reserve(new_capacity)
-                .map_err(|e| VectorError::IndexError(format!("Failed to reserve capacity: {}", e)))?;
+            self.index.reserve(new_capacity).map_err(|e| {
+                VectorError::IndexError(format!("Failed to reserve capacity: {}", e))
+            })?;
         }
 
         // Add to index
@@ -129,9 +156,18 @@ impl VectorIndex {
         Ok(())
     }
 
-    /// Search for the k most similar vectors
+    /// Search for the `k` most similar vectors.
     ///
-    /// Returns results sorted by similarity (highest first).
+    /// # Arguments
+    /// - `query`: Query embedding with length equal to `dim`.
+    /// - `k`: Number of neighbors to return.
+    ///
+    /// # Returns
+    /// Results sorted by similarity (highest first).
+    ///
+    /// # Errors
+    /// Returns `VectorError` if the query dimension is incorrect or the
+    /// search fails.
     pub fn search(&self, query: &[f32], k: usize) -> Result<Vec<VectorSearchResult>> {
         assert_eq!(
             query.len(),
@@ -167,7 +203,13 @@ impl VectorIndex {
         Ok(results)
     }
 
-    /// Remove a vector by ID
+    /// Remove a vector by ID.
+    ///
+    /// # Arguments
+    /// - `id`: Identifier to remove.
+    ///
+    /// # Errors
+    /// Returns `VectorError::NotFound` if the ID is missing.
     pub fn remove(&mut self, id: &str) -> Result<()> {
         if let Some(key) = self.key_map.remove(id) {
             self.index
@@ -181,29 +223,50 @@ impl VectorIndex {
         }
     }
 
-    /// Check if the index contains an ID
+    /// Check if the index contains an ID.
+    ///
+    /// # Arguments
+    /// - `id`: Identifier to check.
+    ///
+    /// # Returns
+    /// True if the ID exists in the index.
     pub fn contains(&self, id: &str) -> bool {
         self.key_map.contains_key(id)
     }
 
-    /// Get the number of vectors in the index
+    /// Get the number of vectors in the index.
+    ///
+    /// # Returns
+    /// Count of stored vectors.
     pub fn len(&self) -> usize {
         self.id_map.len()
     }
 
-    /// Check if the index is empty
+    /// Check if the index is empty.
+    ///
+    /// # Returns
+    /// True if the index has no vectors.
     pub fn is_empty(&self) -> bool {
         self.id_map.is_empty()
     }
 
-    /// Get the embedding dimension
+    /// Get the embedding dimension.
+    ///
+    /// # Returns
+    /// Dimension of vectors stored in the index.
     pub fn dim(&self) -> usize {
         self.dim
     }
 
-    /// Save the index to disk
+    /// Save the index to disk.
     ///
     /// Saves both the usearch index and the ID mappings.
+    ///
+    /// # Arguments
+    /// - `path`: Base path for index artifacts.
+    ///
+    /// # Errors
+    /// Returns `VectorError` if writing to disk fails.
     pub fn save(&self, path: &Path) -> Result<()> {
         // Create directory if needed
         if let Some(parent) = path.parent() {
@@ -213,7 +276,11 @@ impl VectorIndex {
         // Save usearch index
         let index_path = path.with_extension("usearch");
         self.index
-            .save(index_path.to_str().ok_or_else(|| VectorError::IndexError("Invalid path".into()))?)
+            .save(
+                index_path
+                    .to_str()
+                    .ok_or_else(|| VectorError::IndexError("Invalid path".into()))?,
+            )
             .map_err(|e| VectorError::IndexError(e.to_string()))?;
 
         // Save ID mappings as JSON
@@ -235,7 +302,16 @@ impl VectorIndex {
         Ok(())
     }
 
-    /// Load an index from disk
+    /// Load an index from disk.
+    ///
+    /// # Arguments
+    /// - `path`: Base path for index artifacts.
+    ///
+    /// # Returns
+    /// Loaded vector index with mappings restored.
+    ///
+    /// # Errors
+    /// Returns `VectorError` if loading fails.
     pub fn load(path: &Path) -> Result<Self> {
         // Load metadata first to get dimensions
         let meta_path = path.with_extension("json");
@@ -253,16 +329,23 @@ impl VectorIndex {
             multi: false,
         };
 
-        let index =
-            Index::new(&options).map_err(|e| VectorError::IndexError(e.to_string()))?;
+        let index = Index::new(&options).map_err(|e| VectorError::IndexError(e.to_string()))?;
 
         // Load usearch index
         let index_path = path.with_extension("usearch");
         index
-            .load(index_path.to_str().ok_or_else(|| VectorError::IndexError("Invalid path".into()))?)
+            .load(
+                index_path
+                    .to_str()
+                    .ok_or_else(|| VectorError::IndexError("Invalid path".into()))?,
+            )
             .map_err(|e| VectorError::IndexError(e.to_string()))?;
 
-        info!("Loaded vector index: {} vectors from {:?}", meta.id_map.len(), index_path);
+        info!(
+            "Loaded vector index: {} vectors from {:?}",
+            meta.id_map.len(),
+            index_path
+        );
 
         Ok(Self {
             index,
@@ -273,7 +356,13 @@ impl VectorIndex {
         })
     }
 
-    /// Check if saved index files exist
+    /// Check if saved index files exist.
+    ///
+    /// # Arguments
+    /// - `path`: Base path for index artifacts.
+    ///
+    /// # Returns
+    /// True if both usearch and metadata files exist.
     pub fn exists(path: &Path) -> bool {
         path.with_extension("usearch").exists() && path.with_extension("json").exists()
     }

@@ -24,7 +24,7 @@ use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 // Import shared types from core
-use diachron_core::{CaptureEvent, CommandCategory, Operation, send_to_daemon, IpcError};
+use diachron_core::{send_to_daemon, CaptureEvent, CommandCategory, IpcError, Operation};
 
 // ============================================================================
 // HOOK INPUT PARSING
@@ -96,13 +96,36 @@ fn get_last_commit_sha(project_root: &PathBuf) -> Option<String> {
 
 /// Bash commands that should be skipped (read-only)
 const SKIP_PREFIXES: &[&str] = &[
-    "ls", "cat", "head", "tail", "less", "more",
-    "grep", "rg", "find", "fd", "ag",
-    "git status", "git log", "git diff", "git branch", "git show",
-    "pwd", "cd", "echo", "printf", "which", "whereis",
-    "ps", "top", "htop", "df", "du",
-    "python3 -c", "node -e",
-    "hyperfine",  // Don't capture benchmark commands
+    "ls",
+    "cat",
+    "head",
+    "tail",
+    "less",
+    "more",
+    "grep",
+    "rg",
+    "find",
+    "fd",
+    "ag",
+    "git status",
+    "git log",
+    "git diff",
+    "git branch",
+    "git show",
+    "pwd",
+    "cd",
+    "echo",
+    "printf",
+    "which",
+    "whereis",
+    "ps",
+    "top",
+    "htop",
+    "df",
+    "du",
+    "python3 -c",
+    "node -e",
+    "hyperfine", // Don't capture benchmark commands
 ];
 
 fn classify_bash_command(cmd: &str) -> (Operation, Option<String>, CommandCategory) {
@@ -129,39 +152,61 @@ fn classify_bash_command(cmd: &str) -> (Operation, Option<String>, CommandCatego
         return (Operation::Commit, detail, CommandCategory::Git);
     }
 
-    if cmd_lower.starts_with("git push") || cmd_lower.starts_with("git pull")
-       || cmd_lower.starts_with("git checkout") || cmd_lower.starts_with("git merge")
-       || cmd_lower.starts_with("git rebase") || cmd_lower.starts_with("git stash") {
+    if cmd_lower.starts_with("git push")
+        || cmd_lower.starts_with("git pull")
+        || cmd_lower.starts_with("git checkout")
+        || cmd_lower.starts_with("git merge")
+        || cmd_lower.starts_with("git rebase")
+        || cmd_lower.starts_with("git stash")
+    {
         return (Operation::Execute, None, CommandCategory::Git);
     }
 
     // Test commands
-    if cmd_lower.starts_with("npm test") || cmd_lower.starts_with("yarn test")
-       || cmd_lower.starts_with("pytest") || cmd_lower.starts_with("cargo test")
-       || cmd_lower.starts_with("jest") || cmd_lower.starts_with("vitest")
-       || cmd_lower.starts_with("go test") || cmd_lower.contains("test") {
+    if cmd_lower.starts_with("npm test")
+        || cmd_lower.starts_with("yarn test")
+        || cmd_lower.starts_with("pytest")
+        || cmd_lower.starts_with("cargo test")
+        || cmd_lower.starts_with("jest")
+        || cmd_lower.starts_with("vitest")
+        || cmd_lower.starts_with("go test")
+        || cmd_lower.contains("test")
+    {
         return (Operation::Execute, None, CommandCategory::Test);
     }
 
     // Build commands
-    if cmd_lower.starts_with("npm run build") || cmd_lower.starts_with("yarn build")
-       || cmd_lower.starts_with("cargo build") || cmd_lower.starts_with("make")
-       || cmd_lower.starts_with("go build") || cmd_lower.starts_with("tsc")
-       || cmd_lower.starts_with("webpack") || cmd_lower.starts_with("vite build") {
+    if cmd_lower.starts_with("npm run build")
+        || cmd_lower.starts_with("yarn build")
+        || cmd_lower.starts_with("cargo build")
+        || cmd_lower.starts_with("make")
+        || cmd_lower.starts_with("go build")
+        || cmd_lower.starts_with("tsc")
+        || cmd_lower.starts_with("webpack")
+        || cmd_lower.starts_with("vite build")
+    {
         return (Operation::Execute, None, CommandCategory::Build);
     }
 
     // Deploy commands
-    if cmd_lower.contains("deploy") || cmd_lower.starts_with("vercel")
-       || cmd_lower.starts_with("netlify") || cmd_lower.starts_with("fly ")
-       || cmd_lower.starts_with("docker push") || cmd_lower.starts_with("kubectl apply") {
+    if cmd_lower.contains("deploy")
+        || cmd_lower.starts_with("vercel")
+        || cmd_lower.starts_with("netlify")
+        || cmd_lower.starts_with("fly ")
+        || cmd_lower.starts_with("docker push")
+        || cmd_lower.starts_with("kubectl apply")
+    {
         return (Operation::Execute, None, CommandCategory::Deploy);
     }
 
     // Package management
-    if cmd_lower.starts_with("npm install") || cmd_lower.starts_with("yarn add")
-       || cmd_lower.starts_with("pip install") || cmd_lower.starts_with("cargo add")
-       || cmd_lower.starts_with("brew install") || cmd_lower.starts_with("apt install") {
+    if cmd_lower.starts_with("npm install")
+        || cmd_lower.starts_with("yarn add")
+        || cmd_lower.starts_with("pip install")
+        || cmd_lower.starts_with("cargo add")
+        || cmd_lower.starts_with("brew install")
+        || cmd_lower.starts_with("apt install")
+    {
         return (Operation::Execute, None, CommandCategory::Package);
     }
 
@@ -169,15 +214,24 @@ fn classify_bash_command(cmd: &str) -> (Operation, Option<String>, CommandCatego
     if cmd_lower.starts_with("rm") {
         let parts: Vec<&str> = cmd.split_whitespace().collect();
         let file = parts.iter().skip(1).find(|p| !p.starts_with('-'));
-        return (Operation::Delete, file.map(|s| s.to_string()), CommandCategory::FileOps);
+        return (
+            Operation::Delete,
+            file.map(|s| s.to_string()),
+            CommandCategory::FileOps,
+        );
     }
 
     if cmd_lower.starts_with("mv") {
-        let parts: Vec<&str> = cmd.split_whitespace()
+        let parts: Vec<&str> = cmd
+            .split_whitespace()
             .filter(|p| !p.starts_with('-'))
             .collect();
         if parts.len() >= 3 {
-            return (Operation::Move, Some(format!("{} → {}", parts[1], parts[2])), CommandCategory::FileOps);
+            return (
+                Operation::Move,
+                Some(format!("{} → {}", parts[1], parts[2])),
+                CommandCategory::FileOps,
+            );
         }
         return (Operation::Move, None, CommandCategory::FileOps);
     }
@@ -199,11 +253,15 @@ fn classify_bash_command(cmd: &str) -> (Operation, Option<String>, CommandCatego
 // ============================================================================
 
 fn parse_write_event(hook: &HookInput) -> CaptureEvent {
-    let file_path = hook.tool_input.get("file_path")
+    let file_path = hook
+        .tool_input
+        .get("file_path")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
 
-    let content = hook.tool_input.get("content")
+    let content = hook
+        .tool_input
+        .get("content")
         .and_then(|v| v.as_str())
         .unwrap_or("");
 
@@ -239,14 +297,20 @@ fn parse_write_event(hook: &HookInput) -> CaptureEvent {
 }
 
 fn parse_edit_event(hook: &HookInput) -> CaptureEvent {
-    let file_path = hook.tool_input.get("file_path")
+    let file_path = hook
+        .tool_input
+        .get("file_path")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
 
-    let old_string = hook.tool_input.get("old_string")
+    let old_string = hook
+        .tool_input
+        .get("old_string")
         .and_then(|v| v.as_str())
         .unwrap_or("");
-    let new_string = hook.tool_input.get("new_string")
+    let new_string = hook
+        .tool_input
+        .get("new_string")
         .and_then(|v| v.as_str())
         .unwrap_or("");
 
@@ -275,7 +339,9 @@ fn parse_edit_event(hook: &HookInput) -> CaptureEvent {
 }
 
 fn parse_bash_event(hook: &HookInput, project_root: &PathBuf) -> Option<CaptureEvent> {
-    let command = hook.tool_input.get("command")
+    let command = hook
+        .tool_input
+        .get("command")
         .and_then(|v| v.as_str())
         .unwrap_or("");
 
@@ -342,7 +408,9 @@ fn get_timestamp() -> (String, String) {
     // Use actual system timezone (e.g., PST, EST, UTC, etc.)
     let tz_name = now.format("%Z").to_string();
 
-    let display = now.format(&format!("%m/%d/%Y %I:%M %p {}", tz_name)).to_string();
+    let display = now
+        .format(&format!("%m/%d/%Y %I:%M %p {}", tz_name))
+        .to_string();
     (iso, display)
 }
 
@@ -409,7 +477,7 @@ fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
         CREATE INDEX IF NOT EXISTS idx_events_file_path ON events(file_path);
         CREATE INDEX IF NOT EXISTS idx_events_session_id ON events(session_id);
         CREATE INDEX IF NOT EXISTS idx_events_tool_name ON events(tool_name);
-        CREATE INDEX IF NOT EXISTS idx_events_project_path ON events(project_path);"
+        CREATE INDEX IF NOT EXISTS idx_events_project_path ON events(project_path);",
     )
 }
 

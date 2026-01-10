@@ -13,10 +13,10 @@ use tracing::debug;
 
 use diachron_core::{CaptureEvent, Exchange, StoredEvent};
 
-/// Database handle for the daemon
+/// Database handle for the daemon.
 ///
-/// The connection is wrapped in a Mutex because rusqlite::Connection
-/// is not Send/Sync, but we need to share it across async tasks.
+/// The connection is wrapped in a `Mutex` because `rusqlite::Connection`
+/// is not `Send`/`Sync`, but we share it across async tasks.
 pub struct Database {
     /// Path to the database file
     path: PathBuf,
@@ -25,7 +25,13 @@ pub struct Database {
 }
 
 impl Database {
-    /// Open or create a database at the given path
+    /// Open or create a database at the given path.
+    ///
+    /// # Arguments
+    /// - `path`: Path to the SQLite database file.
+    ///
+    /// # Errors
+    /// Returns `anyhow::Error` if the database cannot be opened or initialized.
     pub fn open(path: PathBuf) -> Result<Self> {
         // Ensure parent directory exists
         if let Some(parent) = path.parent() {
@@ -42,9 +48,15 @@ impl Database {
         })
     }
 
-    /// Get access to the connection (via mutex lock)
+    /// Access the connection via a mutex lock.
     ///
     /// Use this for FTS queries that need direct connection access.
+    ///
+    /// # Arguments
+    /// - `f`: Callback executed with a locked connection.
+    ///
+    /// # Errors
+    /// Returns any `rusqlite::Error` from the callback.
     pub fn with_conn<F, R>(&self, f: F) -> Result<R, rusqlite::Error>
     where
         F: FnOnce(&Connection) -> Result<R, rusqlite::Error>,
@@ -53,12 +65,18 @@ impl Database {
         f(&conn)
     }
 
-    /// Save a capture event to the database
+    /// Save a capture event to the database.
     ///
-    /// Parameters:
-    /// - `event`: The capture event data
-    /// - `session_id`: Optional session identifier
-    /// - `embedding`: Optional 384-dim embedding vector (stored as f32 blob)
+    /// # Arguments
+    /// - `event`: Capture event data.
+    /// - `session_id`: Optional session identifier.
+    /// - `embedding`: Optional embedding vector (stored as f32 blob).
+    ///
+    /// # Returns
+    /// Inserted row ID.
+    ///
+    /// # Errors
+    /// Returns `rusqlite::Error` if the insert fails.
     pub fn save_event(
         &self,
         event: &CaptureEvent,
@@ -70,8 +88,9 @@ impl Database {
 
         // Use actual system timezone (e.g., PST, EST, UTC, etc.)
         let tz_name = timestamp.format("%Z").to_string();
-        let timestamp_display =
-            timestamp.format(&format!("%m/%d/%Y %I:%M %p {}", tz_name)).to_string();
+        let timestamp_display = timestamp
+            .format(&format!("%m/%d/%Y %I:%M %p {}", tz_name))
+            .to_string();
 
         // Build metadata JSON - preserve metadata from event (includes git_branch)
         // and merge with any additional fields
@@ -98,9 +117,8 @@ impl Database {
         };
 
         // Convert embedding to blob if present
-        let embedding_blob: Option<Vec<u8>> = embedding.map(|emb| {
-            emb.iter().flat_map(|f| f.to_le_bytes()).collect()
-        });
+        let embedding_blob: Option<Vec<u8>> =
+            embedding.map(|emb| emb.iter().flat_map(|f| f.to_le_bytes()).collect());
 
         let conn = self.conn.lock().unwrap();
         conn.execute(
@@ -126,7 +144,18 @@ impl Database {
         Ok(conn.last_insert_rowid())
     }
 
-    /// Query events with optional filters
+    /// Query events with optional filters.
+    ///
+    /// # Arguments
+    /// - `since`: Optional time filter (relative or ISO).
+    /// - `file_filter`: Optional file path substring.
+    /// - `limit`: Maximum number of events to return.
+    ///
+    /// # Returns
+    /// Vector of stored events ordered by timestamp (descending).
+    ///
+    /// # Errors
+    /// Returns `rusqlite::Error` if the query fails.
     pub fn query_events(
         &self,
         since: Option<&str>,
@@ -189,25 +218,37 @@ impl Database {
         Ok(events)
     }
 
-    /// Get event count
+    /// Get total event count.
+    ///
+    /// # Returns
+    /// Total number of events in the database.
+    ///
+    /// # Errors
+    /// Returns `rusqlite::Error` if the query fails.
     pub fn event_count(&self) -> rusqlite::Result<u64> {
         let conn = self.conn.lock().unwrap();
         let count: i64 = conn.query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))?;
         Ok(count as u64)
     }
 
-    /// Save a conversation exchange to the database
+    /// Save a conversation exchange to the database.
     ///
     /// Uses INSERT OR REPLACE to handle re-indexing gracefully.
+    ///
+    /// # Arguments
+    /// - `exchange`: Exchange record to persist.
+    /// - `embedding`: Optional embedding vector (stored as f32 blob).
+    ///
+    /// # Errors
+    /// Returns `rusqlite::Error` if the insert fails.
     pub fn save_exchange(
         &self,
         exchange: &Exchange,
         embedding: Option<&[f32]>,
     ) -> rusqlite::Result<()> {
         // Convert embedding to blob if present
-        let embedding_blob: Option<Vec<u8>> = embedding.map(|emb| {
-            emb.iter().flat_map(|f| f.to_le_bytes()).collect()
-        });
+        let embedding_blob: Option<Vec<u8>> =
+            embedding.map(|emb| emb.iter().flat_map(|f| f.to_le_bytes()).collect());
 
         let conn = self.conn.lock().unwrap();
         conn.execute(
@@ -238,11 +279,71 @@ impl Database {
         Ok(())
     }
 
-    /// Get exchange count
+    /// Get total exchange count.
+    ///
+    /// # Returns
+    /// Total number of exchanges in the database.
+    ///
+    /// # Errors
+    /// Returns `rusqlite::Error` if the query fails.
     pub fn exchange_count(&self) -> rusqlite::Result<u64> {
         let conn = self.conn.lock().unwrap();
         let count: i64 = conn.query_row("SELECT COUNT(*) FROM exchanges", [], |row| row.get(0))?;
         Ok(count as u64)
+    }
+
+    /// Get exchanges without summaries for summarization.
+    ///
+    /// # Arguments
+    /// - `limit`: Maximum number of exchanges to return.
+    ///
+    /// # Returns
+    /// Vector of (id, user_message, assistant_message) tuples.
+    ///
+    /// # Errors
+    /// Returns `rusqlite::Error` if the query fails.
+    pub fn get_exchanges_without_summary(
+        &self,
+        limit: usize,
+    ) -> rusqlite::Result<Vec<(String, String, String)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, user_message, assistant_message
+             FROM exchanges
+             WHERE summary IS NULL OR summary = ''
+             ORDER BY timestamp DESC
+             LIMIT ?",
+        )?;
+
+        let rows = stmt.query_map([limit], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?;
+
+        let mut results = Vec::new();
+        for row in rows {
+            results.push(row?);
+        }
+        Ok(results)
+    }
+
+    /// Update an exchange's summary.
+    ///
+    /// # Arguments
+    /// - `id`: Exchange ID.
+    /// - `summary`: The generated summary.
+    ///
+    /// # Errors
+    /// Returns `rusqlite::Error` if the update fails.
+    pub fn update_exchange_summary(&self, id: &str, summary: &str) -> rusqlite::Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE exchanges SET summary = ? WHERE id = ?",
+            params![summary, id],
+        )
     }
 }
 

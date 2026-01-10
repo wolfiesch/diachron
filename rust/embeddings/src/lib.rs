@@ -23,15 +23,16 @@ use tracing::{debug, info};
 
 pub use download::{ensure_model_exists, ModelPaths};
 
-/// Embedding dimension for all-MiniLM-L6-v2
+/// Embedding dimension for all-MiniLM-L6-v2.
 pub const EMBEDDING_DIM: usize = 384;
 
-/// Maximum sequence length (BERT limit)
+/// Maximum sequence length (BERT limit).
 pub const MAX_SEQ_LENGTH: usize = 512;
 
-/// Maximum text length before truncation (chars)
+/// Maximum text length before truncation (chars).
 pub const MAX_TEXT_LENGTH: usize = 2000;
 
+/// Error type for embedding operations.
 #[derive(Error, Debug)]
 pub enum EmbeddingError {
     #[error("Model not found at {path}")]
@@ -50,9 +51,10 @@ pub enum EmbeddingError {
     InferenceFailed(String),
 }
 
+/// Result alias for embedding operations.
 pub type Result<T> = std::result::Result<T, EmbeddingError>;
 
-/// Embedding engine configuration
+/// Embedding engine configuration.
 #[derive(Debug, Clone)]
 pub struct EmbeddingConfig {
     /// Path to the ONNX model file
@@ -90,7 +92,13 @@ impl Default for EmbeddingConfig {
 }
 
 impl EmbeddingConfig {
-    /// Create config from model paths
+    /// Create config from model paths.
+    ///
+    /// # Arguments
+    /// - `paths`: Model file paths.
+    ///
+    /// # Returns
+    /// Configuration with model/tokenizer paths set.
     pub fn from_paths(paths: &ModelPaths) -> Self {
         Self {
             model_path: paths.model_path.clone(),
@@ -100,7 +108,7 @@ impl EmbeddingConfig {
     }
 }
 
-/// Embedding engine using ONNX Runtime
+/// Embedding engine using ONNX Runtime.
 pub struct EmbeddingEngine {
     session: Session,
     tokenizer: Tokenizer,
@@ -108,10 +116,17 @@ pub struct EmbeddingEngine {
 }
 
 impl EmbeddingEngine {
-    /// Create a new embedding engine
+    /// Create a new embedding engine.
     ///
     /// Loads the ONNX model and tokenizer from the specified paths.
     /// Use `ensure_model_exists()` to download the model first if needed.
+    ///
+    /// # Arguments
+    /// - `config`: Embedding engine configuration.
+    ///
+    /// # Errors
+    /// Returns `EmbeddingError` if model files are missing or inference
+    /// components fail to initialize.
     pub fn new(config: EmbeddingConfig) -> Result<Self> {
         info!("Loading embedding model from {:?}", config.model_path);
 
@@ -148,26 +163,45 @@ impl EmbeddingEngine {
         })
     }
 
-    /// Create a new embedding engine with default paths
+    /// Create a new embedding engine with default paths.
     ///
     /// Downloads the model if not present.
+    ///
+    /// # Errors
+    /// Returns `EmbeddingError` if the model cannot be downloaded or loaded.
     pub fn new_default() -> Result<Self> {
         let paths = ensure_model_exists()?;
         let config = EmbeddingConfig::from_paths(&paths);
         Self::new(config)
     }
 
-    /// Generate embedding for a single text
+    /// Generate an embedding for a single text.
     ///
-    /// Returns a 384-dimensional normalized float vector.
+    /// # Arguments
+    /// - `text`: Input text to embed.
+    ///
+    /// # Returns
+    /// Normalized embedding vector.
+    ///
+    /// # Errors
+    /// Returns `EmbeddingError` if tokenization or inference fails.
     pub fn embed(&mut self, text: &str) -> Result<Vec<f32>> {
         let embeddings = self.embed_batch(&[text])?;
         Ok(embeddings.into_iter().next().unwrap())
     }
 
-    /// Generate embeddings for multiple texts (batch)
+    /// Generate embeddings for multiple texts (batch).
     ///
-    /// More efficient than calling embed() multiple times.
+    /// More efficient than calling `embed()` multiple times.
+    ///
+    /// # Arguments
+    /// - `texts`: Slice of input texts.
+    ///
+    /// # Returns
+    /// Vector of normalized embeddings in input order.
+    ///
+    /// # Errors
+    /// Returns `EmbeddingError` if tokenization or inference fails.
     pub fn embed_batch(&mut self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
         if texts.is_empty() {
             return Ok(vec![]);
@@ -241,8 +275,7 @@ impl EmbeddingEngine {
         ])?;
 
         // Extract last hidden state (batch_size, seq_len, hidden_size)
-        let (shape, hidden_state_data) = outputs[0]
-            .try_extract_tensor::<f32>()?;
+        let (shape, hidden_state_data) = outputs[0].try_extract_tensor::<f32>()?;
 
         let hidden_size = shape[2] as usize;
         let seq_len_out = shape[1] as usize;
@@ -272,12 +305,18 @@ impl EmbeddingEngine {
         Ok(embeddings)
     }
 
-    /// Get the embedding dimension
+    /// Get the embedding dimension.
+    ///
+    /// # Returns
+    /// Embedding dimension used by the model.
     pub fn dim(&self) -> usize {
         self.config.embedding_dim
     }
 
-    /// Get the model path
+    /// Get the model path.
+    ///
+    /// # Returns
+    /// Path to the ONNX model file.
     pub fn model_path(&self) -> &Path {
         &self.config.model_path
     }
@@ -330,7 +369,17 @@ fn l2_normalize(vec: &[f32]) -> Vec<f32> {
     }
 }
 
-/// Compute cosine similarity between two embeddings
+/// Compute cosine similarity between two embeddings.
+///
+/// # Arguments
+/// - `a`: First embedding.
+/// - `b`: Second embedding.
+///
+/// # Returns
+/// Cosine similarity score.
+///
+/// # Panics
+/// Panics if the embedding lengths do not match.
 pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     assert_eq!(a.len(), b.len(), "Embedding dimensions must match");
 

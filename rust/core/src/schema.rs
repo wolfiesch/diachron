@@ -9,10 +9,16 @@ use rusqlite::Connection;
 
 use crate::error::Result;
 
-/// Current schema version
+/// Current schema version.
 pub const SCHEMA_VERSION: i32 = 3;
 
-/// Initialize or migrate the database schema
+/// Initialize or migrate the database schema.
+///
+/// # Arguments
+/// - `conn`: Open SQLite connection for the database.
+///
+/// # Errors
+/// Returns `Error` if schema queries or migrations fail.
 pub fn init_schema(conn: &Connection) -> Result<()> {
     let version = get_schema_version(conn)?;
 
@@ -36,16 +42,20 @@ fn get_schema_version(conn: &Connection) -> Result<i32> {
         [],
     )?;
 
-    let version: i32 = conn
-        .query_row("SELECT COALESCE(MAX(version), 0) FROM schema_version", [], |row| {
-            row.get(0)
-        })?;
+    let version: i32 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_version",
+        [],
+        |row| row.get(0),
+    )?;
 
     Ok(version)
 }
 
 fn set_schema_version(conn: &Connection, version: i32) -> Result<()> {
-    conn.execute("INSERT INTO schema_version (version) VALUES (?1)", [version])?;
+    conn.execute(
+        "INSERT INTO schema_version (version) VALUES (?1)",
+        [version],
+    )?;
     Ok(())
 }
 
@@ -174,7 +184,18 @@ fn migrate_v3(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-/// Full-text search for events
+/// Full-text search for events.
+///
+/// # Arguments
+/// - `conn`: Open SQLite connection for the database.
+/// - `query`: FTS5 query string.
+/// - `limit`: Maximum number of results to return.
+///
+/// # Returns
+/// Vector of search results ordered by BM25 score.
+///
+/// # Errors
+/// Returns `Error` if query preparation or execution fails.
 pub fn fts_search_events(
     conn: &Connection,
     query: &str,
@@ -208,7 +229,18 @@ pub fn fts_search_events(
     Ok(results)
 }
 
-/// Full-text search for exchanges
+/// Full-text search for exchanges.
+///
+/// # Arguments
+/// - `conn`: Open SQLite connection for the database.
+/// - `query`: FTS5 query string.
+/// - `limit`: Maximum number of results to return.
+///
+/// # Returns
+/// Vector of search results ordered by BM25 score.
+///
+/// # Errors
+/// Returns `Error` if query preparation or execution fails.
 pub fn fts_search_exchanges(
     conn: &Connection,
     query: &str,
@@ -242,7 +274,15 @@ pub fn fts_search_exchanges(
     Ok(results)
 }
 
-/// Result from FTS search
+/// Result from FTS search.
+///
+/// # Fields
+/// - `id`: Event or exchange identifier.
+/// - `timestamp`: ISO timestamp string.
+/// - `context`: File path (events) or project name (exchanges).
+/// - `source_type`: Source label ("event" or "exchange").
+/// - `snippet`: Highlighted snippet for display.
+/// - `score`: BM25 score (lower is better).
 #[derive(Debug, Clone)]
 pub struct FtsSearchResult {
     pub id: String,
