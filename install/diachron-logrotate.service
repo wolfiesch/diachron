@@ -1,0 +1,27 @@
+[Unit]
+Description=Diachron Log Rotation Service
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash -c '\
+    LOG_DIR="$HOME/.diachron/logs"; \
+    MAX_SIZE=$((10 * 1024 * 1024)); \
+    MAX_FILES=7; \
+    rotate_log() { \
+        local log="$1"; \
+        if [ -f "$log" ]; then \
+            local size=$(stat -c%%s "$log" 2>/dev/null || echo 0); \
+            if [ "$size" -gt "$MAX_SIZE" ]; then \
+                for i in $(seq $((MAX_FILES - 1)) -1 1); do \
+                    [ -f "${log}.$i.gz" ] && mv "${log}.$i.gz" "${log}.$((i + 1)).gz"; \
+                done; \
+                [ -f "${log}.$MAX_FILES.gz" ] && rm -f "${log}.$MAX_FILES.gz"; \
+                cp "$log" "${log}.1" && gzip "${log}.1" && : > "$log"; \
+            fi; \
+        fi; \
+    }; \
+    rotate_log "$LOG_DIR/daemon.log"; \
+    rotate_log "$LOG_DIR/daemon.err"'
+
+[Install]
+WantedBy=default.target

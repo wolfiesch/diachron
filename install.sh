@@ -692,6 +692,28 @@ setup_launchd() {
         print_warning "Failed to load launchd service"
         print_info "Start manually: diachron daemon start"
     fi
+
+    # Setup log rotation
+    setup_logrotate_launchd
+}
+
+setup_logrotate_launchd() {
+    local plist_src="$INSTALL_DIR/install/com.diachron.logrotate.plist"
+    local plist_dst="$HOME/Library/LaunchAgents/com.diachron.logrotate.plist"
+
+    if [[ ! -f "$plist_src" ]]; then
+        print_warning "Log rotation plist not found, skipping"
+        return 0
+    fi
+
+    # Install log rotation service
+    cp "$plist_src" "$plist_dst"
+
+    # Load log rotation service
+    launchctl unload "$plist_dst" 2>/dev/null || true
+    launchctl load "$plist_dst" 2>/dev/null || true
+
+    print_success "Log rotation configured (runs daily at 3am)"
 }
 
 setup_systemd() {
@@ -721,6 +743,30 @@ setup_systemd() {
         print_warning "Failed to start systemd service"
         print_info "Start manually: diachron daemon start"
     fi
+
+    # Setup log rotation
+    setup_logrotate_systemd
+}
+
+setup_logrotate_systemd() {
+    local service_src="$INSTALL_DIR/install/diachron-logrotate.service"
+    local timer_src="$INSTALL_DIR/install/diachron-logrotate.timer"
+    local systemd_dir="$HOME/.config/systemd/user"
+
+    if [[ ! -f "$service_src" ]] || [[ ! -f "$timer_src" ]]; then
+        print_warning "Log rotation timer files not found, skipping"
+        return 0
+    fi
+
+    # Copy files
+    cp "$service_src" "$systemd_dir/diachron-logrotate.service"
+    cp "$timer_src" "$systemd_dir/diachron-logrotate.timer"
+
+    # Reload and enable timer
+    systemctl --user daemon-reload 2>/dev/null || true
+    systemctl --user enable --now diachron-logrotate.timer 2>/dev/null || true
+
+    print_success "Log rotation configured (daily systemd timer)"
 }
 
 verify_daemon_running() {

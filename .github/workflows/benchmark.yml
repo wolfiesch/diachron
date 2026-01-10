@@ -1,0 +1,152 @@
+name: Benchmarks
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  benchmark:
+    name: Performance Benchmarks
+    runs-on: macos-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-action@stable
+        with:
+          components: clippy
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            rust/target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Install hyperfine
+        run: brew install hyperfine
+
+      - name: Build release binaries
+        working-directory: rust
+        run: cargo build --release
+
+      - name: Start daemon
+        run: |
+          mkdir -p ~/.diachron/logs
+          ./rust/target/release/diachrond &
+          sleep 3
+          ./rust/target/release/diachron daemon status
+
+      - name: Run CLI benchmark
+        id: cli_bench
+        run: |
+          hyperfine --warmup 2 --runs 20 --export-json /tmp/cli.json \
+            './rust/target/release/diachron --help'
+          CLI_MS=$(jq '.results[0].mean * 1000' /tmp/cli.json)
+          echo "cli_ms=$CLI_MS" >> $GITHUB_OUTPUT
+          echo "CLI cold start: ${CLI_MS}ms"
+
+      - name: Run IPC benchmark
+        id: ipc_bench
+        run: |
+          hyperfine --warmup 3 --runs 20 --export-json /tmp/ipc.json \
+            './rust/target/release/diachron daemon status'
+          IPC_MS=$(jq '.results[0].mean * 1000' /tmp/ipc.json)
+          echo "ipc_ms=$IPC_MS" >> $GITHUB_OUTPUT
+          echo "Daemon IPC: ${IPC_MS}ms"
+
+      - name: Run hook benchmark
+        id: hook_bench
+        run: |
+          hyperfine --warmup 3 --runs 20 --export-json /tmp/hook.json \
+            "echo '{\"tool_name\":\"Write\",\"file_path\":\"/tmp/test.txt\",\"diff_summary\":\"+1\"}' | ./rust/target/release/diachron-hook"
+          HOOK_MS=$(jq '.results[0].mean * 1000' /tmp/hook.json)
+          echo "hook_ms=$HOOK_MS" >> $GITHUB_OUTPUT
+          echo "Hook capture: ${HOOK_MS}ms"
+
+      - name: Check thresholds
+        run: |
+          CLI_MS=${{ steps.cli_bench.outputs.cli_ms }}
+          IPC_MS=${{ steps.ipc_bench.outputs.ipc_ms }}
+          HOOK_MS=${{ steps.hook_bench.outputs.hook_ms }}
+
+          echo "=== Benchmark Results ==="
+          echo "CLI cold start: ${CLI_MS}ms (threshold: 50ms)"
+          echo "Daemon IPC: ${IPC_MS}ms (threshold: 20ms)"
+          echo "Hook capture: ${HOOK_MS}ms (threshold: 20ms)"
+          echo ""
+
+          FAILED=0
+
+          if (( $(echo "$CLI_MS > 50" | bc -l) )); then
+            echo "❌ CLI cold start exceeded threshold"
+            FAILED=1
+          else
+            echo "✅ CLI cold start OK"
+          fi
+
+          if (( $(echo "$IPC_MS > 20" | bc -l) )); then
+            echo "❌ Daemon IPC exceeded threshold"
+            FAILED=1
+          else
+            echo "✅ Daemon IPC OK"
+          fi
+
+          if (( $(echo "$HOOK_MS > 20" | bc -l) )); then
+            echo "❌ Hook capture exceeded threshold"
+            FAILED=1
+          else
+            echo "✅ Hook capture OK"
+          fi
+
+          exit $FAILED
+
+      - name: Upload benchmark results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results
+          path: /tmp/*.json
+
+      - name: Comment on PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const cli = ${{ steps.cli_bench.outputs.cli_ms }};
+            const ipc = ${{ steps.ipc_bench.outputs.ipc_ms }};
+            const hook = ${{ steps.hook_bench.outputs.hook_ms }};
+
+            const body = `## ⚡ Benchmark Results
+
+            | Metric | Value | Threshold | Status |
+            |--------|-------|-----------|--------|
+            | CLI cold start | ${cli.toFixed(2)}ms | 50ms | ${cli < 50 ? '✅' : '❌'} |
+            | Daemon IPC | ${ipc.toFixed(2)}ms | 20ms | ${ipc < 20 ? '✅' : '❌'} |
+            | Hook capture | ${hook.toFixed(2)}ms | 20ms | ${hook < 20 ? '✅' : '❌'} |
+            `;
+
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: body
+            });
+
+      - name: Stop daemon
+        if: always()
+        run: ./rust/target/release/diachron daemon stop || true
