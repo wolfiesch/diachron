@@ -45,6 +45,10 @@ enum Commands {
         /// Maximum number of events to show
         #[arg(long, default_value = "20")]
         limit: usize,
+
+        /// Output format: text, json, csv, markdown
+        #[arg(long, default_value = "text")]
+        format: String,
     },
 
     /// Capture an event (called by hook)
@@ -85,10 +89,44 @@ enum Commands {
         /// Filter by project name
         #[arg(long)]
         project: Option<String>,
+
+        /// Output format: text, json, csv, markdown
+        #[arg(long, default_value = "text")]
+        format: String,
     },
 
     /// Run diagnostics
     Doctor,
+
+    /// Configuration management
+    Config {
+        #[command(subcommand)]
+        command: ConfigCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum ConfigCommands {
+    /// List all configuration settings
+    List,
+
+    /// Get a configuration value
+    Get {
+        /// Config key (e.g., "summarization.enabled")
+        key: String,
+    },
+
+    /// Set a configuration value
+    Set {
+        /// Config key (e.g., "summarization.enabled")
+        key: String,
+
+        /// Value to set
+        value: String,
+    },
+
+    /// Open configuration file in editor
+    Edit,
 }
 
 #[derive(Subcommand)]
@@ -159,7 +197,12 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Timeline { since, file, limit } => {
+        Commands::Timeline {
+            since,
+            file,
+            limit,
+            format,
+        } => {
             let msg = IpcMessage::Timeline {
                 since,
                 file_filter: file,
@@ -169,18 +212,60 @@ fn main() -> Result<()> {
             match send_message(&msg) {
                 Ok(IpcResponse::Events(events)) => {
                     if events.is_empty() {
-                        println!("No events found");
+                        if format == "text" {
+                            println!("No events found");
+                        } else if format == "json" {
+                            println!("[]");
+                        }
+                        // CSV/markdown: just output headers with no data
                     } else {
-                        for event in events {
-                            println!(
-                                "{} {} {}",
-                                event
-                                    .timestamp_display
-                                    .as_deref()
-                                    .unwrap_or(&event.timestamp),
-                                event.tool_name,
-                                event.file_path.as_deref().unwrap_or("-")
-                            );
+                        match format.as_str() {
+                            "json" => {
+                                println!("{}", serde_json::to_string_pretty(&events).unwrap());
+                            }
+                            "csv" => {
+                                println!("timestamp,tool_name,file_path,operation,session_id");
+                                for event in events {
+                                    println!(
+                                        "\"{}\",\"{}\",\"{}\",\"{}\",\"{}\"",
+                                        event.timestamp,
+                                        event.tool_name,
+                                        event.file_path.as_deref().unwrap_or(""),
+                                        event.operation.as_deref().unwrap_or(""),
+                                        event.session_id.as_deref().unwrap_or("")
+                                    );
+                                }
+                            }
+                            "markdown" | "md" => {
+                                println!("| Timestamp | Tool | File | Operation |");
+                                println!("|-----------|------|------|-----------|");
+                                for event in events {
+                                    println!(
+                                        "| {} | {} | {} | {} |",
+                                        event
+                                            .timestamp_display
+                                            .as_deref()
+                                            .unwrap_or(&event.timestamp),
+                                        event.tool_name,
+                                        event.file_path.as_deref().unwrap_or("-"),
+                                        event.operation.as_deref().unwrap_or("-")
+                                    );
+                                }
+                            }
+                            _ => {
+                                // Default: text format
+                                for event in events {
+                                    println!(
+                                        "{} {} {}",
+                                        event
+                                            .timestamp_display
+                                            .as_deref()
+                                            .unwrap_or(&event.timestamp),
+                                        event.tool_name,
+                                        event.file_path.as_deref().unwrap_or("-")
+                                    );
+                                }
+                            }
                         }
                     }
                 }
@@ -274,7 +359,85 @@ fn main() -> Result<()> {
             }
 
             MemoryCommands::Status => {
-                println!("Memory status: Not implemented yet");
+                let msg = IpcMessage::DoctorInfo;
+                match send_message(&msg) {
+                    Ok(IpcResponse::Doctor(info)) => {
+                        println!("Memory Status");
+                        println!("=============\n");
+
+                        println!("Conversation Index:");
+                        println!("  Exchanges indexed: {}", info.exchanges_count);
+                        println!("  Vector embeddings: {} vectors", info.exchanges_index_count);
+                        println!(
+                            "  Index size: {:.1} MB",
+                            info.exchanges_index_size_bytes as f64 / 1024.0 / 1024.0
+                        );
+
+                        println!("\nCode Events:");
+                        println!("  Events captured: {}", info.events_count);
+                        println!("  Vector embeddings: {} vectors", info.events_index_count);
+                        println!(
+                            "  Index size: {:.1} KB",
+                            info.events_index_size_bytes as f64 / 1024.0
+                        );
+
+                        println!("\nStorage:");
+                        println!(
+                            "  Database: {:.1} MB",
+                            info.database_size_bytes as f64 / 1024.0 / 1024.0
+                        );
+                        println!(
+                            "  Total index: {:.1} MB",
+                            (info.events_index_size_bytes + info.exchanges_index_size_bytes) as f64
+                                / 1024.0
+                                / 1024.0
+                        );
+
+                        println!("\nEmbedding Model:");
+                        if info.model_loaded {
+                            println!("  Status: ✓ loaded");
+                        } else {
+                            println!("  Status: ✗ not loaded (will load on first search)");
+                        }
+                        if info.model_size_bytes > 0 {
+                            println!(
+                                "  Size: {:.1} MB",
+                                info.model_size_bytes as f64 / 1024.0 / 1024.0
+                            );
+                        }
+
+                        println!("\nDaemon:");
+                        println!("  Uptime: {}s", info.uptime_secs);
+                        println!(
+                            "  Memory (RSS): {:.1} MB",
+                            info.memory_rss_bytes as f64 / 1024.0 / 1024.0
+                        );
+                    }
+                    Ok(IpcResponse::Pong {
+                        uptime_secs,
+                        events_count,
+                    }) => {
+                        // Fallback for older daemon without DoctorInfo
+                        println!("Memory Status (limited - daemon too old)");
+                        println!("=========================================\n");
+                        println!("Events captured: {}", events_count);
+                        println!("Uptime: {}s", uptime_secs);
+                        println!("\nUpgrade daemon for full stats: diachron daemon stop && diachron daemon start");
+                    }
+                    Ok(IpcResponse::Error(e)) => {
+                        eprintln!("Error: {}", e);
+                        std::process::exit(1);
+                    }
+                    Ok(_) => {
+                        eprintln!("Unexpected response");
+                        std::process::exit(1);
+                    }
+                    Err(e) => {
+                        eprintln!("Failed to communicate with daemon: {}", e);
+                        eprintln!("Is the daemon running? Try: diachron daemon start");
+                        std::process::exit(1);
+                    }
+                }
             }
 
             MemoryCommands::Summarize { limit } => {
@@ -426,6 +589,7 @@ fn main() -> Result<()> {
             r#type,
             since,
             project,
+            format,
         } => {
             let source_filter = r#type.and_then(|t| match t.as_str() {
                 "event" => Some(diachron_core::SearchSource::Event),
@@ -444,20 +608,74 @@ fn main() -> Result<()> {
             match send_message(&msg) {
                 Ok(IpcResponse::SearchResults(results)) => {
                     if results.is_empty() {
-                        println!("No results found");
+                        if format == "text" {
+                            println!("No results found");
+                        } else if format == "json" {
+                            println!("[]");
+                        }
                     } else {
-                        for result in results {
-                            // Format source as colored indicator
-                            let source_str = match result.source {
-                                diachron_core::SearchSource::Event => "Event",
-                                diachron_core::SearchSource::Exchange => "Exchange",
-                            };
-                            // Show project if available
-                            let proj_str = result.project.as_deref().unwrap_or("-");
-                            println!(
-                                "[{:.2}] {} {} ({}) - {}",
-                                result.score, source_str, result.timestamp, proj_str, result.snippet
-                            );
+                        match format.as_str() {
+                            "json" => {
+                                println!("{}", serde_json::to_string_pretty(&results).unwrap());
+                            }
+                            "csv" => {
+                                println!("score,source,timestamp,project,snippet");
+                                for result in results {
+                                    let source_str = match result.source {
+                                        diachron_core::SearchSource::Event => "event",
+                                        diachron_core::SearchSource::Exchange => "exchange",
+                                    };
+                                    // Escape quotes in snippet for CSV
+                                    let snippet_escaped = result.snippet.replace('"', "\"\"");
+                                    println!(
+                                        "{:.4},\"{}\",\"{}\",\"{}\",\"{}\"",
+                                        result.score,
+                                        source_str,
+                                        result.timestamp,
+                                        result.project.as_deref().unwrap_or(""),
+                                        snippet_escaped
+                                    );
+                                }
+                            }
+                            "markdown" | "md" => {
+                                println!("| Score | Source | Timestamp | Project | Snippet |");
+                                println!("|-------|--------|-----------|---------|---------|");
+                                for result in results {
+                                    let source_str = match result.source {
+                                        diachron_core::SearchSource::Event => "Event",
+                                        diachron_core::SearchSource::Exchange => "Exchange",
+                                    };
+                                    // Escape pipes in snippet for markdown
+                                    let snippet_escaped =
+                                        result.snippet.replace('|', "\\|").replace('\n', " ");
+                                    println!(
+                                        "| {:.2} | {} | {} | {} | {} |",
+                                        result.score,
+                                        source_str,
+                                        result.timestamp,
+                                        result.project.as_deref().unwrap_or("-"),
+                                        snippet_escaped
+                                    );
+                                }
+                            }
+                            _ => {
+                                // Default: text format
+                                for result in results {
+                                    let source_str = match result.source {
+                                        diachron_core::SearchSource::Event => "Event",
+                                        diachron_core::SearchSource::Exchange => "Exchange",
+                                    };
+                                    let proj_str = result.project.as_deref().unwrap_or("-");
+                                    println!(
+                                        "[{:.2}] {} {} ({}) - {}",
+                                        result.score,
+                                        source_str,
+                                        result.timestamp,
+                                        proj_str,
+                                        result.snippet
+                                    );
+                                }
+                            }
                         }
                     }
                 }
@@ -561,7 +779,171 @@ fn main() -> Result<()> {
 
             println!("\n--- End Diagnostics ---");
         }
+
+        Commands::Config { command } => {
+            let diachron_home = dirs::home_dir()
+                .map(|h| h.join(".diachron"))
+                .unwrap_or_else(|| PathBuf::from("/tmp/.diachron"));
+            let config_path = diachron_home.join("config.toml");
+
+            match command {
+                ConfigCommands::List => {
+                    println!("Configuration: {:?}\n", config_path);
+
+                    if config_path.exists() {
+                        let content = std::fs::read_to_string(&config_path)
+                            .context("Failed to read config file")?;
+                        println!("{}", content);
+                    } else {
+                        println!("No config file found. Using defaults.\n");
+                        println!("Default settings:");
+                        println!("  [summarization]");
+                        println!("  enabled = true");
+                        println!("  model = \"claude-3-haiku-20240307\"");
+                        println!("  max_tokens = 300");
+                        println!("\nCreate config with: diachron config set <key> <value>");
+                    }
+                }
+
+                ConfigCommands::Get { key } => {
+                    if !config_path.exists() {
+                        eprintln!("Config file not found. Using defaults.");
+                        // Print default for known keys
+                        match key.as_str() {
+                            "summarization.enabled" => println!("true"),
+                            "summarization.model" => println!("claude-3-haiku-20240307"),
+                            "summarization.max_tokens" => println!("300"),
+                            _ => eprintln!("Unknown key: {}", key),
+                        }
+                        return Ok(());
+                    }
+
+                    let content = std::fs::read_to_string(&config_path)
+                        .context("Failed to read config file")?;
+                    let config: toml::Value = toml::from_str(&content)
+                        .context("Failed to parse config file")?;
+
+                    // Navigate nested keys like "summarization.enabled"
+                    let parts: Vec<&str> = key.split('.').collect();
+                    let mut current = &config;
+                    for part in &parts {
+                        match current.get(part) {
+                            Some(v) => current = v,
+                            None => {
+                                eprintln!("Key not found: {}", key);
+                                std::process::exit(1);
+                            }
+                        }
+                    }
+                    println!("{}", current);
+                }
+
+                ConfigCommands::Set { key, value } => {
+                    // Ensure config directory exists
+                    std::fs::create_dir_all(&diachron_home).ok();
+
+                    // Load existing config or start fresh
+                    let mut config: toml::map::Map<String, toml::Value> = if config_path.exists() {
+                        let content = std::fs::read_to_string(&config_path)
+                            .context("Failed to read config file")?;
+                        match toml::from_str(&content) {
+                            Ok(toml::Value::Table(t)) => t,
+                            _ => toml::map::Map::new(),
+                        }
+                    } else {
+                        toml::map::Map::new()
+                    };
+
+                    // Navigate to set nested key like "summarization.enabled"
+                    let parts: Vec<&str> = key.split('.').collect();
+                    if parts.len() == 1 {
+                        // Top-level key
+                        config.insert(key.clone(), parse_toml_value(&value));
+                    } else if parts.len() == 2 {
+                        // Nested key (e.g., "summarization.enabled")
+                        let section = parts[0];
+                        let subkey = parts[1];
+
+                        let section_table = config
+                            .entry(section.to_string())
+                            .or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
+
+                        if let toml::Value::Table(ref mut t) = section_table {
+                            t.insert(subkey.to_string(), parse_toml_value(&value));
+                        }
+                    } else {
+                        eprintln!("Keys deeper than 2 levels not supported");
+                        std::process::exit(1);
+                    }
+
+                    // Write back
+                    let new_content = toml::to_string_pretty(&toml::Value::Table(config))
+                        .context("Failed to serialize config")?;
+                    std::fs::write(&config_path, new_content)
+                        .context("Failed to write config file")?;
+
+                    println!("Set {} = {}", key, value);
+                    println!("Restart daemon for changes to take effect: diachron daemon stop && diachron daemon start");
+                }
+
+                ConfigCommands::Edit => {
+                    // Create default config if it doesn't exist
+                    if !config_path.exists() {
+                        std::fs::create_dir_all(&diachron_home).ok();
+                        let default_config = r#"# Diachron Configuration
+
+[summarization]
+# API key for Anthropic (optional - uses ANTHROPIC_API_KEY env var if not set)
+# api_key = "sk-ant-..."
+
+# Model for summarization
+model = "claude-3-haiku-20240307"
+
+# Maximum tokens for summaries
+max_tokens = 300
+
+# Enable/disable summarization
+enabled = true
+"#;
+                        std::fs::write(&config_path, default_config)
+                            .context("Failed to create config file")?;
+                    }
+
+                    // Open in editor
+                    let editor = std::env::var("EDITOR").unwrap_or_else(|_| "nano".to_string());
+                    let status = std::process::Command::new(&editor)
+                        .arg(&config_path)
+                        .status()
+                        .context("Failed to open editor")?;
+
+                    if status.success() {
+                        println!("Config saved. Restart daemon for changes to take effect.");
+                    }
+                }
+            }
+        }
     }
 
     Ok(())
+}
+
+/// Parse a string value into appropriate TOML type
+fn parse_toml_value(s: &str) -> toml::Value {
+    // Try boolean
+    if s == "true" {
+        return toml::Value::Boolean(true);
+    }
+    if s == "false" {
+        return toml::Value::Boolean(false);
+    }
+    // Try integer
+    if let Ok(n) = s.parse::<i64>() {
+        return toml::Value::Integer(n);
+    }
+    // Try float
+    if let Ok(f) = s.parse::<f64>() {
+        return toml::Value::Float(f);
+    }
+    // Default to string
+    toml::Value::String(s.to_string())
 }

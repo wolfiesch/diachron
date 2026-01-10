@@ -6,7 +6,7 @@ use anyhow::Result;
 use tokio::net::UnixListener;
 use tracing::{error, info};
 
-use crate::{handle_client, DaemonState};
+use crate::{background, handle_client, DaemonState};
 
 /// Run the daemon server
 pub async fn run(state: Arc<DaemonState>) -> Result<()> {
@@ -15,6 +15,12 @@ pub async fn run(state: Arc<DaemonState>) -> Result<()> {
     // Create Unix socket listener
     let listener = UnixListener::bind(&socket_path)?;
     info!("Listening on {:?}", socket_path);
+
+    // Start background indexing task
+    let bg_state = Arc::clone(&state);
+    tokio::spawn(async move {
+        background::background_indexing_task(bg_state).await;
+    });
 
     // Accept connections
     loop {

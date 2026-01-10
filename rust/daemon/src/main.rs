@@ -19,6 +19,7 @@ use anyhow::Result;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tracing::{info, warn};
 
+mod background;
 mod db;
 mod handlers;
 mod indexer;

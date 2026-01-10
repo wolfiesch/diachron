@@ -16,3 +16,4 @@ anyhow = { workspace = true }
 interprocess = { workspace = true }
 dirs = { workspace = true }
 diachron-core = { path = "../core" }
+toml = "0.8"
