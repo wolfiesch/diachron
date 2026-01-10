@@ -21,6 +21,7 @@ use tracing::{info, warn};
 
 mod db;
 mod handlers;
+mod indexer;
 mod server;
 
 pub use db::Database;

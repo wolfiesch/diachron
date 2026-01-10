@@ -150,6 +150,12 @@ pub enum IpcResponse {
     SearchResults(Vec<SearchResult>),
     Events(Vec<StoredEvent>),
     Pong { uptime_secs: u64, events_count: u64 },
+    /// Result of indexing conversations
+    IndexStats {
+        exchanges_indexed: u64,
+        archives_processed: u64,
+        errors: u64,
+    },
 }
 
 /// Event as stored in database (with ID and timestamps)

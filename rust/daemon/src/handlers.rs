@@ -9,6 +9,10 @@ use diachron_core::{
     fts_search_events, fts_search_exchanges, IpcMessage, IpcResponse, SearchResult, SearchSource,
 };
 
+use crate::indexer::{
+    self, build_exchange_embed_text, discover_archives, get_mtime, parse_archive, ArchiveState,
+    IndexState,
+};
 use crate::DaemonState;
 
 /// Handle an incoming IPC message
@@ -126,11 +130,136 @@ pub async fn handle_message(msg: IpcMessage, state: &Arc<DaemonState>) -> IpcRes
         }
 
         IpcMessage::IndexConversations => {
-            info!("Index conversations requested");
+            info!("Starting conversation indexing...");
 
-            // TODO: Phase 3 - Parse JSONL archives, generate embeddings
+            // 1. Discover archives
+            let claude_dir = dirs::home_dir()
+                .expect("Could not find home directory")
+                .join(".claude");
+            let archives = discover_archives(&claude_dir);
+            info!("Found {} archives to process", archives.len());
 
-            IpcResponse::Ok
+            // 2. Load index state for incremental processing
+            let state_path = state.diachron_home.join("index_state.json");
+            let mut index_state = IndexState::load(&state_path);
+
+            let mut total_indexed: u64 = 0;
+            let mut archives_processed: u64 = 0;
+            let mut errors: u64 = 0;
+
+            // 3. Process each archive
+            for archive_path in archives {
+                let path_str = archive_path.to_string_lossy().to_string();
+                let mtime = get_mtime(&archive_path);
+
+                // Check if needs indexing (skip unchanged files)
+                let start_line = if let Some(prev) = index_state.archives.get(&path_str) {
+                    if prev.mtime >= mtime {
+                        debug!("Skipping unchanged archive: {}", path_str);
+                        continue; // Skip unchanged
+                    }
+                    prev.last_line
+                } else {
+                    0
+                };
+
+                // 4. Parse exchanges from archive
+                match parse_archive(&archive_path, start_line) {
+                    Ok(exchanges) => {
+                        if exchanges.is_empty() {
+                            continue;
+                        }
+
+                        let mut last_line: u64 = start_line;
+
+                        for exchange in &exchanges {
+                            // Track last line for checkpoint
+                            if let Some(line_end) = exchange.line_end {
+                                last_line = last_line.max(line_end as u64);
+                            }
+
+                            // 5. Generate embedding
+                            let embed_text = build_exchange_embed_text(exchange);
+                            let embedding =
+                                if let Ok(mut engine_guard) = state.embedding_engine.write() {
+                                    if let Some(ref mut engine) = *engine_guard {
+                                        match engine.embed(&embed_text) {
+                                            Ok(emb) => Some(emb),
+                                            Err(e) => {
+                                                warn!("Failed to embed exchange: {}", e);
+                                                None
+                                            }
+                                        }
+                                    } else {
+                                        None
+                                    }
+                                } else {
+                                    None
+                                };
+
+                            // 6. Save to database
+                            if let Err(e) = state.db.save_exchange(exchange, embedding.as_deref()) {
+                                warn!("Failed to save exchange {}: {}", exchange.id, e);
+                                errors += 1;
+                                continue;
+                            }
+
+                            // 7. Add to vector index
+                            if let Some(ref emb) = embedding {
+                                if let Ok(mut idx) = state.exchanges_index.write() {
+                                    let exchange_id = format!("exchange:{}", exchange.id);
+                                    if let Err(e) = idx.add(&exchange_id, emb) {
+                                        warn!("Failed to add to vector index: {}", e);
+                                    }
+                                }
+                            }
+
+                            total_indexed += 1;
+                        }
+
+                        // 8. Update checkpoint for this archive
+                        index_state.archives.insert(
+                            path_str.clone(),
+                            ArchiveState {
+                                last_line,
+                                mtime,
+                            },
+                        );
+                        archives_processed += 1;
+
+                        debug!(
+                            "Indexed {} exchanges from {}",
+                            exchanges.len(),
+                            path_str
+                        );
+                    }
+                    Err(e) => {
+                        warn!("Failed to parse {}: {}", path_str, e);
+                        errors += 1;
+                    }
+                }
+            }
+
+            // 9. Save index state
+            if let Err(e) = index_state.save(&state_path) {
+                error!("Failed to save index state: {}", e);
+            }
+
+            // 10. Save vector indexes
+            if let Err(e) = state.save_indexes() {
+                error!("Failed to save vector indexes: {}", e);
+            }
+
+            info!(
+                "Indexing complete: {} exchanges from {} archives ({} errors)",
+                total_indexed, archives_processed, errors
+            );
+
+            IpcResponse::IndexStats {
+                exchanges_indexed: total_indexed,
+                archives_processed,
+                errors,
+            }
         }
     }
 }
@@ -153,8 +282,13 @@ fn build_event_embed_text(event: &diachron_core::CaptureEvent) -> String {
 
     if let Some(ref raw) = event.raw_input {
         // Truncate raw input to avoid overwhelming the embedding
+        // Safe truncate to handle UTF-8 char boundaries
         let truncated = if raw.len() > 500 {
-            &raw[..500]
+            let mut end = 500;
+            while end > 0 && !raw.is_char_boundary(end) {
+                end -= 1;
+            }
+            &raw[..end]
         } else {
             raw.as_str()
         };

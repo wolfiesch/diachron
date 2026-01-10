@@ -11,7 +11,7 @@ use anyhow::{Context, Result};
 use rusqlite::{params, Connection};
 use tracing::debug;
 
-use diachron_core::{CaptureEvent, StoredEvent};
+use diachron_core::{CaptureEvent, Exchange, StoredEvent};
 
 /// Database handle for the daemon
 ///
@@ -193,6 +193,55 @@ impl Database {
     pub fn event_count(&self) -> rusqlite::Result<u64> {
         let conn = self.conn.lock().unwrap();
         let count: i64 = conn.query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))?;
+        Ok(count as u64)
+    }
+
+    /// Save a conversation exchange to the database
+    ///
+    /// Uses INSERT OR REPLACE to handle re-indexing gracefully.
+    pub fn save_exchange(
+        &self,
+        exchange: &Exchange,
+        embedding: Option<&[f32]>,
+    ) -> rusqlite::Result<()> {
+        // Convert embedding to blob if present
+        let embedding_blob: Option<Vec<u8>> = embedding.map(|emb| {
+            emb.iter().flat_map(|f| f.to_le_bytes()).collect()
+        });
+
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO exchanges (
+                id, timestamp, project, session_id, user_message,
+                assistant_message, tool_calls, archive_path, line_start,
+                line_end, embedding, summary, git_branch, cwd
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+            params![
+                exchange.id,
+                exchange.timestamp,
+                exchange.project,
+                exchange.session_id,
+                exchange.user_message,
+                exchange.assistant_message,
+                exchange.tool_calls,
+                exchange.archive_path,
+                exchange.line_start,
+                exchange.line_end,
+                embedding_blob,
+                exchange.summary,
+                exchange.git_branch,
+                exchange.cwd,
+            ],
+        )?;
+
+        debug!("Saved exchange: {}", exchange.id);
+        Ok(())
+    }
+
+    /// Get exchange count
+    pub fn exchange_count(&self) -> rusqlite::Result<u64> {
+        let conn = self.conn.lock().unwrap();
+        let count: i64 = conn.query_row("SELECT COUNT(*) FROM exchanges", [], |row| row.get(0))?;
         Ok(count as u64)
     }
 }
