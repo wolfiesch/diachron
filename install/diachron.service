@@ -1,0 +1,30 @@
+[Unit]
+Description=Diachron Provenance Daemon - AI-assisted development tracking
+Documentation=https://github.com/wolfiesch/diachron
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=%h/.claude/skills/diachron/rust/target/release/diachrond
+Restart=on-failure
+RestartSec=5
+
+# Environment
+Environment=RUST_LOG=info
+Environment=HOME=%h
+
+# Working directory
+WorkingDirectory=%h/.diachron
+
+# Logging
+StandardOutput=append:%h/.diachron/logs/daemon.log
+StandardError=append:%h/.diachron/logs/daemon.err
+
+# Security hardening
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ReadWritePaths=%h/.diachron %h/.claude
+
+[Install]
+WantedBy=default.target

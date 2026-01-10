@@ -260,9 +260,65 @@ fn main() -> Result<()> {
 
         Commands::Daemon { command } => match command {
             DaemonCommands::Start => {
-                println!("Starting daemon...");
-                // TODO: Fork and exec diachrond
-                println!("Daemon start not yet implemented");
+                // Check if already running
+                let socket = socket_path();
+                if socket.exists() {
+                    if let Ok(IpcResponse::Pong { .. }) = send_message(&IpcMessage::Ping) {
+                        println!("Daemon is already running");
+                        return Ok(());
+                    }
+                    // Stale socket file - remove it
+                    let _ = std::fs::remove_file(&socket);
+                }
+
+                // Find daemon binary (same directory as CLI)
+                let daemon_path = std::env::current_exe()?
+                    .parent()
+                    .map(|p| p.join("diachrond"))
+                    .context("Could not determine executable directory")?;
+
+                if !daemon_path.exists() {
+                    eprintln!("Daemon binary not found at {:?}", daemon_path);
+                    eprintln!("Hint: Build with 'cargo build --release' first");
+                    std::process::exit(1);
+                }
+
+                // Create logs directory
+                let diachron_home = dirs::home_dir()
+                    .map(|h| h.join(".diachron"))
+                    .unwrap_or_else(|| PathBuf::from("/tmp/.diachron"));
+                let logs_dir = diachron_home.join("logs");
+                std::fs::create_dir_all(&logs_dir).ok();
+
+                // Start daemon process
+                use std::process::{Command, Stdio};
+                let log_file = std::fs::File::create(logs_dir.join("daemon.log"))
+                    .context("Failed to create log file")?;
+                let err_file = std::fs::File::create(logs_dir.join("daemon.err"))
+                    .context("Failed to create error log file")?;
+
+                let child = Command::new(&daemon_path)
+                    .stdout(Stdio::from(log_file))
+                    .stderr(Stdio::from(err_file))
+                    .spawn()
+                    .context("Failed to start daemon")?;
+
+                // Write PID file
+                let pid_file = diachron_home.join("daemon.pid");
+                std::fs::write(&pid_file, child.id().to_string())
+                    .context("Failed to write PID file")?;
+
+                println!("Daemon started with PID {}", child.id());
+                println!("Logs: {}", logs_dir.display());
+
+                // Wait a moment and verify it's running
+                std::thread::sleep(Duration::from_millis(500));
+                if let Ok(IpcResponse::Pong { .. }) = send_message(&IpcMessage::Ping) {
+                    println!("Daemon is running and responding");
+                } else {
+                    eprintln!("Warning: Daemon started but not responding yet");
+                    eprintln!("Check logs: {}", logs_dir.join("daemon.err").display());
+                }
             }
 
             DaemonCommands::Stop => {

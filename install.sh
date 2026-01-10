@@ -645,6 +645,102 @@ run_doctor() {
 }
 
 # ============================================================================
+# Daemon Service Setup
+# ============================================================================
+
+setup_daemon_service() {
+    print_step "Setting up daemon auto-start..."
+
+    # Create logs directory
+    mkdir -p "$HOME/.diachron/logs"
+
+    if [[ "$OSTYPE" == "darwin"* ]]; then
+        setup_launchd
+    elif [[ "$OSTYPE" == "linux-gnu"* ]]; then
+        setup_systemd
+    else
+        print_warning "Daemon auto-start not supported on this OS"
+        print_info "Start manually: diachron daemon start"
+        return 0
+    fi
+}
+
+setup_launchd() {
+    local plist_src="$INSTALL_DIR/install/com.diachron.daemon.plist"
+    local plist_dst="$HOME/Library/LaunchAgents/com.diachron.daemon.plist"
+
+    if [[ ! -f "$plist_src" ]]; then
+        print_warning "Launchd plist template not found"
+        return 1
+    fi
+
+    # Create LaunchAgents directory if needed
+    mkdir -p "$HOME/Library/LaunchAgents"
+
+    # Expand $HOME in template
+    sed "s|\$HOME|$HOME|g" "$plist_src" > "$plist_dst"
+
+    # Unload existing service if any
+    launchctl unload "$plist_dst" 2>/dev/null || true
+
+    # Load the service
+    if launchctl load "$plist_dst" 2>/dev/null; then
+        print_success "Daemon configured (launchd)"
+        print_info "Status: launchctl list | grep diachron"
+        print_info "Logs: ~/.diachron/logs/"
+    else
+        print_warning "Failed to load launchd service"
+        print_info "Start manually: diachron daemon start"
+    fi
+}
+
+setup_systemd() {
+    local service_src="$INSTALL_DIR/install/diachron.service"
+    local service_dst="$HOME/.config/systemd/user/diachron.service"
+
+    if [[ ! -f "$service_src" ]]; then
+        print_warning "Systemd service template not found"
+        return 1
+    fi
+
+    # Create systemd user directory
+    mkdir -p "$HOME/.config/systemd/user"
+
+    # Copy service file
+    cp "$service_src" "$service_dst"
+
+    # Reload systemd
+    systemctl --user daemon-reload 2>/dev/null || true
+
+    # Enable and start the service
+    if systemctl --user enable --now diachron 2>/dev/null; then
+        print_success "Daemon configured (systemd)"
+        print_info "Status: systemctl --user status diachron"
+        print_info "Logs: ~/.diachron/logs/"
+    else
+        print_warning "Failed to start systemd service"
+        print_info "Start manually: diachron daemon start"
+    fi
+}
+
+verify_daemon_running() {
+    local cli_path="$INSTALL_DIR/rust/target/release/diachron"
+
+    if [[ ! -f "$cli_path" ]]; then
+        return 1
+    fi
+
+    # Wait a moment for daemon to start
+    sleep 2
+
+    if "$cli_path" daemon status 2>/dev/null | grep -q "Running"; then
+        return 0
+    else
+        return 1
+    fi
+}
+
+# ============================================================================
 # Main Installation Flow
 # ============================================================================
 
@@ -657,6 +753,17 @@ main_install() {
     build_rust_hook
     configure_settings
     verify_installation
+
+    # Setup daemon auto-start
+    echo ""
+    setup_daemon_service
+
+    # Verify daemon is running
+    if verify_daemon_running; then
+        print_success "Daemon is running and ready"
+    else
+        print_info "Start daemon manually: diachron daemon start"
+    fi
 
     print_header "Installation Complete!"
 
@@ -675,6 +782,13 @@ main_install() {
     echo "  /diachron status  - Check tracking status"
     echo "  /timeline         - View change history"
     echo "  /timeline --stats - Show statistics"
+    echo "  /memory \"query\"   - Search conversation memory"
+    echo "  /search \"query\"   - Unified semantic search"
+    echo ""
+    echo "Daemon management:"
+    echo "  diachron daemon status  - Check daemon status"
+    echo "  diachron daemon start   - Start daemon manually"
+    echo "  diachron daemon stop    - Stop daemon"
     echo ""
     echo "For help: $REPO_URL"
     echo ""
