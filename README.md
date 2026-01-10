@@ -56,13 +56,31 @@ Diachron uses **Claude Code 2.1's hook architecture** to transparently capture e
 ### Installation
 
 ```bash
+# One-liner install (recommended)
+curl -fsSL https://raw.githubusercontent.com/wolfiesch/diachron/main/install.sh | bash
+```
+
+The installer automatically:
+- Clones to `~/.claude/skills/diachron/`
+- Configures the PostToolUse hook in your settings
+- Detects your architecture and selects the optimal hook (Rust or Python)
+- Verifies the installation
+
+**After install:** Restart Claude Code to activate the hook.
+
+<details>
+<summary>Alternative: Manual installation</summary>
+
+```bash
 # Clone to Claude Code skills directory
 git clone https://github.com/wolfiesch/diachron ~/.claude/skills/diachron
 
-# Configure the hook (see INSTALL.md for details)
+# Run the installer
+~/.claude/skills/diachron/install.sh
 ```
 
-See [INSTALL.md](./INSTALL.md) for complete installation instructions.
+See [INSTALL.md](./INSTALL.md) for complete manual installation instructions.
+</details>
 
 ### Usage
 
@@ -215,9 +233,23 @@ See [TROUBLESHOOTING.md](./TROUBLESHOOTING.md) for common issues and solutions.
 
 Quick diagnostics:
 ```bash
-/diachron status              # Check initialization
-ls .diachron/events.db        # Verify database exists
-sqlite3 .diachron/events.db "SELECT COUNT(*) FROM events"  # Count events
+# Run installer diagnostics
+~/.claude/skills/diachron/install.sh --doctor
+
+# Check project status
+/diachron status
+
+# Verify database
+sqlite3 .diachron/events.db "SELECT COUNT(*) FROM events"
+```
+
+### Installer Commands
+
+```bash
+install.sh              # Install or update
+install.sh --update     # Pull latest and rebuild
+install.sh --doctor     # Run diagnostics
+install.sh --uninstall  # Remove completely
 ```
 
 ## Roadmap

@@ -2,6 +2,40 @@
 
 Complete guide to installing and configuring Diachron for Claude Code.
 
+## Quick Install (Recommended)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/wolfiesch/diachron/main/install.sh | bash
+```
+
+The installer automatically handles everything:
+- Clones the repository to `~/.claude/skills/diachron/`
+- Configures the PostToolUse hook in your settings
+- Detects your system architecture (ARM64/x86)
+- Selects the optimal hook (pre-built Rust binary or Python fallback)
+- Creates a backup of your settings.json
+- Verifies the installation
+
+**After install:** Restart Claude Code to activate the hook.
+
+### Installer Options
+
+```bash
+# Update to latest version
+~/.claude/skills/diachron/install.sh --update
+
+# Run diagnostics
+~/.claude/skills/diachron/install.sh --doctor
+
+# Uninstall completely
+~/.claude/skills/diachron/install.sh --uninstall
+
+# Show help
+~/.claude/skills/diachron/install.sh --help
+```
+
+---
+
 ## Prerequisites
 
 | Requirement | Version | Notes |
@@ -12,21 +46,25 @@ Complete guide to installing and configuring Diachron for Claude Code.
 
 **Optional:**
 - OpenAI API key (for AI-powered summaries via `/timeline --summarize`)
+- Rust 1.70+ (for building from source on non-ARM64 systems)
 
-## Installation Methods
+---
 
-### Method 1: Git Clone (Recommended)
+## Manual Installation
+
+If you prefer not to use the automated installer, follow these steps:
+
+### Method 1: Git Clone
 
 ```bash
 # Clone directly into Claude Code skills directory
 git clone https://github.com/wolfiesch/diachron ~/.claude/skills/diachron
 
-# Verify installation
-ls ~/.claude/skills/diachron
-# Should show: README.md, diachron.md, timeline.md, lib/, rust/, etc.
+# Then run the installer to configure hooks
+~/.claude/skills/diachron/install.sh
 ```
 
-### Method 2: Manual Download
+### Method 2: Fully Manual
 
 1. Download the latest release from GitHub
 2. Extract to `~/.claude/skills/diachron/`
@@ -47,7 +85,9 @@ ls ~/.claude/skills/diachron
     └── target/release/diachron-hook  # Pre-built binary (macOS ARM64)
 ```
 
-## Configure the PostToolUse Hook (Required)
+## Configure the PostToolUse Hook
+
+> **Note:** If you used the installer script, this is already done for you. Skip to [Verify Installation](#verify-installation).
 
 Diachron captures events via a PostToolUse hook. You must add this to your Claude Code settings.
 
