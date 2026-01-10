@@ -11,7 +11,7 @@ use anyhow::{Context, Result};
 use rusqlite::{params, Connection};
 use tracing::debug;
 
-use diachron_core::{CaptureEvent, StoredEvent};
+use diachron_core::{CaptureEvent, Exchange, StoredEvent};
 
 /// Database handle for the daemon
 ///
@@ -195,6 +195,55 @@ impl Database {
         let count: i64 = conn.query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))?;
         Ok(count as u64)
     }
+
+    /// Save a conversation exchange to the database
+    ///
+    /// Uses INSERT OR REPLACE to handle re-indexing gracefully.
+    pub fn save_exchange(
+        &self,
+        exchange: &Exchange,
+        embedding: Option<&[f32]>,
+    ) -> rusqlite::Result<()> {
+        // Convert embedding to blob if present
+        let embedding_blob: Option<Vec<u8>> = embedding.map(|emb| {
+            emb.iter().flat_map(|f| f.to_le_bytes()).collect()
+        });
+
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO exchanges (
+                id, timestamp, project, session_id, user_message,
+                assistant_message, tool_calls, archive_path, line_start,
+                line_end, embedding, summary, git_branch, cwd
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+            params![
+                exchange.id,
+                exchange.timestamp,
+                exchange.project,
+                exchange.session_id,
+                exchange.user_message,
+                exchange.assistant_message,
+                exchange.tool_calls,
+                exchange.archive_path,
+                exchange.line_start,
+                exchange.line_end,
+                embedding_blob,
+                exchange.summary,
+                exchange.git_branch,
+                exchange.cwd,
+            ],
+        )?;
+
+        debug!("Saved exchange: {}", exchange.id);
+        Ok(())
+    }
+
+    /// Get exchange count
+    pub fn exchange_count(&self) -> rusqlite::Result<u64> {
+        let conn = self.conn.lock().unwrap();
+        let count: i64 = conn.query_row("SELECT COUNT(*) FROM exchanges", [], |row| row.get(0))?;
+        Ok(count as u64)
+    }
 }
 
 /// Parse a time filter string into an ISO timestamp
@@ -271,6 +320,48 @@ mod tests {
         let events = db.query_events(None, None, 10).unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].tool_name, "Write");
+    }
+
+    #[test]
+    fn test_save_exchange() {
+        let db = Database::open(PathBuf::from(":memory:")).unwrap();
+
+        let exchange = Exchange {
+            id: "test-exchange-001".to_string(),
+            timestamp: "2026-01-10T12:00:00Z".to_string(),
+            project: Some("test-project".to_string()),
+            session_id: Some("session-123".to_string()),
+            user_message: "How do I implement authentication?".to_string(),
+            assistant_message: "You can use OAuth2 or JWT...".to_string(),
+            tool_calls: Some(r#"["Read", "Write"]"#.to_string()),
+            archive_path: Some("/path/to/archive.jsonl".to_string()),
+            line_start: Some(100),
+            line_end: Some(150),
+            embedding: None,
+            summary: Some("Discussion about auth implementation".to_string()),
+            git_branch: Some("feat/auth".to_string()),
+            cwd: Some("/home/user/project".to_string()),
+        };
+
+        // Save without embedding
+        db.save_exchange(&exchange, None).unwrap();
+
+        // Verify count
+        assert_eq!(db.exchange_count().unwrap(), 1);
+
+        // Save with embedding (384-dim vector)
+        let embedding = vec![0.1f32; 384];
+        let exchange2 = Exchange {
+            id: "test-exchange-002".to_string(),
+            ..exchange.clone()
+        };
+        db.save_exchange(&exchange2, Some(&embedding)).unwrap();
+
+        assert_eq!(db.exchange_count().unwrap(), 2);
+
+        // Test INSERT OR REPLACE (re-save same ID should not increase count)
+        db.save_exchange(&exchange, None).unwrap();
+        assert_eq!(db.exchange_count().unwrap(), 2);
     }
 
     #[test]
