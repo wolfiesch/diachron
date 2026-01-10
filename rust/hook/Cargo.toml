@@ -1,0 +1,17 @@
+[package]
+name = "diachron-hook"
+version.workspace = true
+edition.workspace = true
+description = "Fast PostToolUse hook for Diachron provenance tracking"
+
+[[bin]]
+name = "diachron-hook"
+path = "src/main.rs"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+rusqlite = { workspace = true }
+diachron-core = { path = "../core" }
+dirs = { workspace = true }

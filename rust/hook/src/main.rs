@@ -3,6 +3,10 @@
 //! This is a Rust port of the Python hook_capture.py for maximum performance.
 //! Target: <20ms total execution time vs Python's ~300ms.
 //!
+//! Architecture:
+//! 1. Try sending event to daemon via Unix socket IPC (~16ms)
+//! 2. If daemon unavailable, fall back to local database write (~13ms)
+//!
 //! Phase 2 enhancements:
 //! - Git branch capture on every event
 //! - Commit SHA for git commit events
@@ -19,62 +23,12 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+// Import shared types from core
+use diachron_core::{CaptureEvent, CommandCategory, Operation, send_to_daemon, IpcError};
+
 // ============================================================================
-// DATA STRUCTURES
+// HOOK INPUT PARSING
 // ============================================================================
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum Operation {
-    Create,
-    Modify,
-    Delete,
-    Move,
-    Copy,
-    Commit,
-    Execute,
-    Unknown,
-}
-
-impl Operation {
-    fn as_str(&self) -> &'static str {
-        match self {
-            Operation::Create => "create",
-            Operation::Modify => "modify",
-            Operation::Delete => "delete",
-            Operation::Move => "move",
-            Operation::Copy => "copy",
-            Operation::Commit => "commit",
-            Operation::Execute => "execute",
-            Operation::Unknown => "unknown",
-        }
-    }
-}
-
-/// Semantic command categories for richer timeline context
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum CommandCategory {
-    Git,
-    Test,
-    Build,
-    Deploy,
-    FileOps,
-    Package,
-    Unknown,
-}
-
-impl CommandCategory {
-    fn as_str(&self) -> &'static str {
-        match self {
-            CommandCategory::Git => "git",
-            CommandCategory::Test => "test",
-            CommandCategory::Build => "build",
-            CommandCategory::Deploy => "deploy",
-            CommandCategory::FileOps => "file_ops",
-            CommandCategory::Package => "package",
-            CommandCategory::Unknown => "unknown",
-        }
-    }
-}
 
 #[derive(Debug, Deserialize)]
 struct HookInput {
@@ -88,21 +42,6 @@ struct HookInput {
     cwd: Option<String>,
 }
 
-#[derive(Debug)]
-struct CaptureEvent {
-    tool_name: String,
-    file_path: Option<String>,
-    operation: Operation,
-    diff_summary: Option<String>,
-    raw_input: Option<String>,
-    /// JSON metadata (git branch, command category, etc.)
-    metadata: Option<String>,
-    /// Commit SHA for git commit events
-    git_commit_sha: Option<String>,
-    /// Semantic category for bash commands
-    command_category: Option<CommandCategory>,
-}
-
 // ============================================================================
 // GIT HELPERS
 // ============================================================================
@@ -112,7 +51,7 @@ fn get_current_branch(project_root: &PathBuf) -> Option<String> {
     Command::new("git")
         .args(["branch", "--show-current"])
         .current_dir(project_root)
-        .stdin(Stdio::null())  // Prevent stdin inheritance
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .output()
@@ -134,7 +73,7 @@ fn get_last_commit_sha(project_root: &PathBuf) -> Option<String> {
     Command::new("git")
         .args(["rev-parse", "--short", "HEAD"])
         .current_dir(project_root)
-        .stdin(Stdio::null())  // Prevent stdin inheritance
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .output()
@@ -293,7 +232,7 @@ fn parse_write_event(hook: &HookInput) -> CaptureEvent {
         operation,
         diff_summary,
         raw_input,
-        metadata: None,  // Populated in save_event with git branch
+        metadata: None,
         git_commit_sha: None,
         command_category: None,
     }
@@ -329,7 +268,7 @@ fn parse_edit_event(hook: &HookInput) -> CaptureEvent {
         operation: Operation::Modify,
         diff_summary,
         raw_input: None,
-        metadata: None,  // Populated in save_event with git branch
+        metadata: None,
         git_commit_sha: None,
         command_category: None,
     }
@@ -359,36 +298,49 @@ fn parse_bash_event(hook: &HookInput, project_root: &PathBuf) -> Option<CaptureE
         file_path: None,
         operation,
         diff_summary: detail,
+        // [*TO-DO:P2*] Raw input truncated to 500 chars with no indicator
+        // Consider: adding "..." suffix, increasing limit, or storing full command
         raw_input: Some(command.chars().take(500).collect()),
-        metadata: None,  // Populated in save_event with git branch
+        metadata: None,
         git_commit_sha,
         command_category: Some(category),
     })
 }
 
 fn parse_hook_input(hook: &HookInput, project_root: &PathBuf) -> Option<CaptureEvent> {
-    match hook.tool_name.as_str() {
+    let mut event = match hook.tool_name.as_str() {
         "Write" => Some(parse_write_event(hook)),
         "Edit" => Some(parse_edit_event(hook)),
         "Bash" => parse_bash_event(hook, project_root),
         _ => None,
+    }?;
+
+    // Add git branch metadata
+    let git_branch = get_current_branch(project_root);
+    if git_branch.is_some() || event.command_category.is_some() {
+        let mut meta = json!({});
+        if let Some(branch) = &git_branch {
+            meta["git_branch"] = json!(branch);
+        }
+        if let Some(category) = &event.command_category {
+            meta["command_category"] = json!(category.as_str());
+        }
+        event.metadata = Some(meta.to_string());
     }
+
+    Some(event)
 }
 
 // ============================================================================
-// DATABASE OPERATIONS
+// DATABASE FALLBACK (when daemon is not running)
 // ============================================================================
 
 fn get_timestamp() -> (String, String) {
     let now = Local::now();
     let iso = now.format("%Y-%m-%dT%H:%M:%S%.3f").to_string();
 
-    // Determine PST/PDT (simplified - checks if we're in DST)
-    let tz_name = if now.format("%Z").to_string().contains("DT") {
-        "PDT"
-    } else {
-        "PST"
-    };
+    // Use actual system timezone (e.g., PST, EST, UTC, etc.)
+    let tz_name = now.format("%Z").to_string();
 
     let display = now.format(&format!("%m/%d/%Y %I:%M %p {}", tz_name)).to_string();
     (iso, display)
@@ -398,7 +350,6 @@ fn get_or_create_session_id(diachron_dir: &PathBuf) -> String {
     let session_file = diachron_dir.join(".session_id");
     let session_expiry_secs = 3600; // 1 hour
 
-    // Try to read existing session
     if session_file.exists() {
         if let Ok(metadata) = fs::metadata(&session_file) {
             if let Ok(modified) = metadata.modified() {
@@ -411,7 +362,6 @@ fn get_or_create_session_id(diachron_dir: &PathBuf) -> String {
                     if let Ok(session_id) = fs::read_to_string(&session_file) {
                         let session_id = session_id.trim().to_string();
                         if !session_id.is_empty() {
-                            // Touch file to extend session
                             let _ = fs::write(&session_file, &session_id);
                             return session_id;
                         }
@@ -421,7 +371,8 @@ fn get_or_create_session_id(diachron_dir: &PathBuf) -> String {
         }
     }
 
-    // Generate new session ID
+    // [*TO-DO:P2*] Session ID collision risk - only 48 bits of entropy
+    // Consider using uuid crate or full timestamp + random component for better uniqueness
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -433,6 +384,7 @@ fn get_or_create_session_id(diachron_dir: &PathBuf) -> String {
 }
 
 fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
+    // Schema matches diachron_core::schema v3 for consistency
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS events (
             id INTEGER PRIMARY KEY,
@@ -448,17 +400,21 @@ fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
             git_commit_sha TEXT,
             parent_event_id INTEGER,
             metadata TEXT,
+            embedding BLOB,
+            project_path TEXT,
             FOREIGN KEY (parent_event_id) REFERENCES events(id)
         );
 
         CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events(timestamp);
         CREATE INDEX IF NOT EXISTS idx_events_file_path ON events(file_path);
         CREATE INDEX IF NOT EXISTS idx_events_session_id ON events(session_id);
-        CREATE INDEX IF NOT EXISTS idx_events_tool_name ON events(tool_name);"
+        CREATE INDEX IF NOT EXISTS idx_events_tool_name ON events(tool_name);
+        CREATE INDEX IF NOT EXISTS idx_events_project_path ON events(project_path);"
     )
 }
 
-fn save_event(event: &CaptureEvent, project_root: &PathBuf) -> rusqlite::Result<i64> {
+/// Fallback: Save event directly to local project database
+fn save_to_local_db(event: &CaptureEvent, project_root: &PathBuf) -> rusqlite::Result<i64> {
     let diachron_dir = project_root.join(".diachron");
     let db_path = diachron_dir.join("events.db");
 
@@ -467,23 +423,6 @@ fn save_event(event: &CaptureEvent, project_root: &PathBuf) -> rusqlite::Result<
 
     let (timestamp_iso, timestamp_display) = get_timestamp();
     let session_id = get_or_create_session_id(&diachron_dir);
-
-    // Build metadata JSON with git branch and command category
-    let git_branch = get_current_branch(project_root);
-    let metadata = {
-        let mut meta = json!({});
-        if let Some(branch) = &git_branch {
-            meta["git_branch"] = json!(branch);
-        }
-        if let Some(category) = &event.command_category {
-            meta["command_category"] = json!(category.as_str());
-        }
-        if meta.as_object().map(|o| o.is_empty()).unwrap_or(true) {
-            None
-        } else {
-            Some(meta.to_string())
-        }
-    };
 
     conn.execute(
         "INSERT INTO events (
@@ -500,7 +439,7 @@ fn save_event(event: &CaptureEvent, project_root: &PathBuf) -> rusqlite::Result<
             event.diff_summary,
             event.raw_input,
             event.git_commit_sha,
-            metadata,
+            event.metadata,
         ],
     )?;
 
@@ -557,14 +496,30 @@ fn main() {
         None => std::process::exit(0), // Not in a Diachron-enabled project
     };
 
-    // Parse event (pass project_root for git SHA capture on commits)
+    // Parse event
     let event = match parse_hook_input(&hook, &project_root) {
         Some(e) => e,
         None => std::process::exit(0), // Event should be skipped
     };
 
-    // Save to database (silently ignore errors - hooks shouldn't crash)
-    let _ = save_event(&event, &project_root);
+    // Try sending to daemon first (preferred path)
+    match send_to_daemon(event.clone()) {
+        Ok(()) => {
+            // Daemon handled the event - success!
+            std::process::exit(0);
+        }
+        Err(IpcError::DaemonNotRunning) => {
+            // Daemon not available - fall back to local DB
+            // This is the expected path when daemon hasn't been started
+        }
+        Err(_) => {
+            // Other error - fall back to local DB
+            // Could log this error somewhere for debugging
+        }
+    }
+
+    // Fallback: Save directly to local project database
+    let _ = save_to_local_db(&event, &project_root);
 
     std::process::exit(0);
 }

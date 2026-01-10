@@ -1,0 +1,18 @@
+[package]
+name = "diachron-embeddings"
+version.workspace = true
+edition.workspace = true
+description = "Embedding engine for Diachron (ONNX-based)"
+
+[lib]
+name = "diachron_embeddings"
+path = "src/lib.rs"
+
+[dependencies]
+thiserror = { workspace = true }
+tracing = { workspace = true }
+ort = { workspace = true }
+tokenizers = { workspace = true }
+ndarray = { workspace = true }
+reqwest = { workspace = true }
+dirs = { workspace = true }
