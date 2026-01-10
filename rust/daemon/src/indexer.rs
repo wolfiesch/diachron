@@ -10,6 +10,8 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
+use twox_hash::XxHash64;
+
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
@@ -119,12 +121,30 @@ pub fn discover_archives(claude_dir: &Path) -> Vec<PathBuf> {
     let mut archives = Vec::new();
 
     if let Ok(entries) = fs::read_dir(&projects_dir) {
-        for entry in entries.flatten() {
+        for entry_result in entries {
+            let entry = match entry_result {
+                Ok(e) => e,
+                Err(e) => {
+                    warn!("Failed to read project directory entry: {}", e);
+                    continue;
+                }
+            };
             let project_path = entry.path();
             if project_path.is_dir() {
                 // Look for .jsonl files in each project directory
                 if let Ok(files) = fs::read_dir(&project_path) {
-                    for file in files.flatten() {
+                    for file_result in files {
+                        let file = match file_result {
+                            Ok(f) => f,
+                            Err(e) => {
+                                warn!(
+                                    "Failed to read file entry in {}: {}",
+                                    project_path.display(),
+                                    e
+                                );
+                                continue;
+                            }
+                        };
                         let file_path = file.path();
                         if file_path.extension().map(|e| e == "jsonl").unwrap_or(false) {
                             archives.push(file_path);
@@ -150,9 +170,11 @@ fn extract_project_name(archive_path: &Path) -> String {
 }
 
 /// Generate a unique exchange ID
+///
+/// Uses XxHash64 with fixed seed for stable hashing across Rust versions.
+/// DefaultHasher is not guaranteed to be stable between Rust releases.
 fn generate_exchange_id(project: &str, timestamp: &str, user_prefix: &str) -> String {
-    // Use a simple hash-based approach without cryptographic hashing
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    let mut hasher = XxHash64::with_seed(0);
     project.hash(&mut hasher);
     timestamp.hash(&mut hasher);
     user_prefix.hash(&mut hasher);
@@ -285,7 +307,7 @@ pub fn parse_archive(
                         let user_text = extract_text_content(&user_content.content);
                         let assistant_text = extract_text_content(&assistant_content.content);
 
-                        // Skip if either is empty
+                        // Skip if both are empty (keep exchanges with at least one side)
                         if user_text.is_empty() && assistant_text.is_empty() {
                             continue;
                         }
@@ -344,7 +366,7 @@ pub fn parse_archive(
 ///
 /// UTF-8 strings can't be sliced at arbitrary byte positions - this function
 /// finds the nearest valid character boundary at or before the target length.
-fn safe_truncate(s: &str, max_bytes: usize) -> &str {
+pub fn safe_truncate(s: &str, max_bytes: usize) -> &str {
     if s.len() <= max_bytes {
         return s;
     }

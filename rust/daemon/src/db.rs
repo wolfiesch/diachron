@@ -323,6 +323,48 @@ mod tests {
     }
 
     #[test]
+    fn test_save_exchange() {
+        let db = Database::open(PathBuf::from(":memory:")).unwrap();
+
+        let exchange = Exchange {
+            id: "test-exchange-001".to_string(),
+            timestamp: "2026-01-10T12:00:00Z".to_string(),
+            project: Some("test-project".to_string()),
+            session_id: Some("session-123".to_string()),
+            user_message: "How do I implement authentication?".to_string(),
+            assistant_message: "You can use OAuth2 or JWT...".to_string(),
+            tool_calls: Some(r#"["Read", "Write"]"#.to_string()),
+            archive_path: Some("/path/to/archive.jsonl".to_string()),
+            line_start: Some(100),
+            line_end: Some(150),
+            embedding: None,
+            summary: Some("Discussion about auth implementation".to_string()),
+            git_branch: Some("feat/auth".to_string()),
+            cwd: Some("/home/user/project".to_string()),
+        };
+
+        // Save without embedding
+        db.save_exchange(&exchange, None).unwrap();
+
+        // Verify count
+        assert_eq!(db.exchange_count().unwrap(), 1);
+
+        // Save with embedding (384-dim vector)
+        let embedding = vec![0.1f32; 384];
+        let exchange2 = Exchange {
+            id: "test-exchange-002".to_string(),
+            ..exchange.clone()
+        };
+        db.save_exchange(&exchange2, Some(&embedding)).unwrap();
+
+        assert_eq!(db.exchange_count().unwrap(), 2);
+
+        // Test INSERT OR REPLACE (re-save same ID should not increase count)
+        db.save_exchange(&exchange, None).unwrap();
+        assert_eq!(db.exchange_count().unwrap(), 2);
+    }
+
+    #[test]
     fn test_parse_time_filter() {
         assert!(parse_time_filter("1h").is_some());
         assert!(parse_time_filter("2d").is_some());

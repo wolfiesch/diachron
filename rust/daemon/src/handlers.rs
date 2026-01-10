@@ -10,8 +10,8 @@ use diachron_core::{
 };
 
 use crate::indexer::{
-    self, build_exchange_embed_text, discover_archives, get_mtime, parse_archive, ArchiveState,
-    IndexState,
+    build_exchange_embed_text, discover_archives, get_mtime, parse_archive, safe_truncate,
+    ArchiveState, IndexState,
 };
 use crate::DaemonState;
 
@@ -133,9 +133,15 @@ pub async fn handle_message(msg: IpcMessage, state: &Arc<DaemonState>) -> IpcRes
             info!("Starting conversation indexing...");
 
             // 1. Discover archives
-            let claude_dir = dirs::home_dir()
-                .expect("Could not find home directory")
-                .join(".claude");
+            let claude_dir = match dirs::home_dir() {
+                Some(home) => home.join(".claude"),
+                None => {
+                    error!("Could not determine home directory for archive discovery");
+                    return IpcResponse::Error(
+                        "Could not determine home directory for archive discovery".to_string(),
+                    );
+                }
+            };
             let archives = discover_archives(&claude_dir);
             info!("Found {} archives to process", archives.len());
 
@@ -153,12 +159,13 @@ pub async fn handle_message(msg: IpcMessage, state: &Arc<DaemonState>) -> IpcRes
                 let mtime = get_mtime(&archive_path);
 
                 // Check if needs indexing (skip unchanged files)
+                // Use saturating_add(1) to start after last processed line (avoid off-by-one)
                 let start_line = if let Some(prev) = index_state.archives.get(&path_str) {
                     if prev.mtime >= mtime {
                         debug!("Skipping unchanged archive: {}", path_str);
                         continue; // Skip unchanged
                     }
-                    prev.last_line
+                    prev.last_line.saturating_add(1)
                 } else {
                     0
                 };
@@ -282,16 +289,8 @@ fn build_event_embed_text(event: &diachron_core::CaptureEvent) -> String {
 
     if let Some(ref raw) = event.raw_input {
         // Truncate raw input to avoid overwhelming the embedding
-        // Safe truncate to handle UTF-8 char boundaries
-        let truncated = if raw.len() > 500 {
-            let mut end = 500;
-            while end > 0 && !raw.is_char_boundary(end) {
-                end -= 1;
-            }
-            &raw[..end]
-        } else {
-            raw.as_str()
-        };
+        // Uses shared safe_truncate for UTF-8 char boundary handling
+        let truncated = safe_truncate(raw, 500);
         parts.push(format!("Content: {}", truncated));
     }
 

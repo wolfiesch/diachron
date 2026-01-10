@@ -20,5 +20,6 @@ interprocess = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 dirs = { workspace = true }
+twox-hash = "2"
 diachron-core = { path = "../core" }
 diachron-embeddings = { path = "../embeddings" }
