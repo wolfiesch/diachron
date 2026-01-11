@@ -93,6 +93,11 @@ enum Commands {
         /// Output format: text, json, csv, markdown
         #[arg(long, default_value = "text")]
         format: String,
+
+        /// Context injection mode: output formatted for session start injection
+        /// Produces summarized, token-limited output suitable for additionalContext
+        #[arg(long)]
+        context_mode: bool,
     },
 
     /// Run diagnostics
@@ -590,6 +595,7 @@ fn main() -> Result<()> {
             since,
             project,
             format,
+            context_mode,
         } => {
             let source_filter = r#type.and_then(|t| match t.as_str() {
                 "event" => Some(diachron_core::SearchSource::Event),
@@ -608,11 +614,16 @@ fn main() -> Result<()> {
             match send_message(&msg) {
                 Ok(IpcResponse::SearchResults(results)) => {
                     if results.is_empty() {
-                        if format == "text" {
+                        if context_mode {
+                            // Silent for context mode - no results means no context to inject
+                        } else if format == "text" {
                             println!("No results found");
                         } else if format == "json" {
                             println!("[]");
                         }
+                    } else if context_mode {
+                        // Context injection mode: format for session start
+                        format_context_output(&results);
                     } else {
                         match format.as_str() {
                             "json" => {
@@ -946,4 +957,85 @@ fn parse_toml_value(s: &str) -> toml::Value {
     }
     // Default to string
     toml::Value::String(s.to_string())
+}
+
+/// Format search results for context injection at session start.
+///
+/// Produces token-conscious output:
+/// - Max 1500 tokens (~6000 chars)
+/// - Summarized snippets (first 200 chars each)
+/// - Formatted as markdown for Claude to parse
+fn format_context_output(results: &[diachron_core::SearchResult]) {
+    const MAX_CHARS: usize = 6000; // ~1500 tokens
+    const SNIPPET_MAX: usize = 200;
+
+    let mut output = String::new();
+    let mut char_count = 0;
+    let mut included_count = 0;
+
+    // Header
+    let header = "## Prior Context from This Project\n\n";
+    output.push_str(header);
+    char_count += header.len();
+
+    for result in results {
+        // Format each result as a compact entry
+        let date = if result.timestamp.len() >= 10 {
+            &result.timestamp[..10] // YYYY-MM-DD
+        } else {
+            &result.timestamp
+        };
+
+        let source_str = match result.source {
+            diachron_core::SearchSource::Event => "Code change",
+            diachron_core::SearchSource::Exchange => "Discussion",
+        };
+
+        // Truncate snippet safely (UTF-8 aware)
+        let snippet = safe_truncate(&result.snippet, SNIPPET_MAX);
+        let snippet_clean = snippet.replace('\n', " ").trim().to_string();
+
+        let entry = format!(
+            "### {} - {}\n{}\n\n",
+            date, source_str, snippet_clean
+        );
+
+        // Check token budget
+        if char_count + entry.len() > MAX_CHARS {
+            break;
+        }
+
+        output.push_str(&entry);
+        char_count += entry.len();
+        included_count += 1;
+    }
+
+    // Footer with stats (helps user understand what was injected)
+    let word_count = output.split_whitespace().count();
+    let approx_tokens = word_count * 4 / 3; // Rough approximation
+    let footer = format!(
+        "_({} items, ~{} tokens)_\n",
+        included_count, approx_tokens
+    );
+
+    if char_count + footer.len() <= MAX_CHARS + 100 {
+        output.push_str(&footer);
+    }
+
+    print!("{}", output);
+}
+
+/// Safely truncate a string at a UTF-8 character boundary.
+fn safe_truncate(s: &str, max_len: usize) -> &str {
+    if s.len() <= max_len {
+        return s;
+    }
+
+    // Find the last valid char boundary at or before max_len
+    let mut end = max_len;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+
+    &s[..end]
 }
