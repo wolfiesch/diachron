@@ -255,14 +255,14 @@ function EvidencePackView({ result, onCopyMarkdown, onDownloadJson, copied }: Ev
               <span
                 className={cn(
                   'badge',
-                  result.summary.coverage_pct >= 80
+                  result.coverage_pct >= 80
                     ? 'bg-confidence-high/20 text-confidence-high'
-                    : result.summary.coverage_pct >= 50
+                    : result.coverage_pct >= 50
                     ? 'bg-confidence-medium/20 text-confidence-medium'
                     : 'bg-confidence-low/20 text-confidence-low'
                 )}
               >
-                {result.summary.coverage_pct.toFixed(0)}% AI Coverage
+                {result.coverage_pct.toFixed(0)}% AI Coverage
               </span>
             </div>
             <p className="text-sm text-noir-500">
@@ -329,7 +329,7 @@ function EvidencePackView({ result, onCopyMarkdown, onDownloadJson, copied }: Ev
           <div className="bg-noir-800/30 rounded-lg p-4">
             <p className="text-xs text-noir-500 uppercase tracking-wider">AI Events</p>
             <p className="text-2xl font-display font-semibold text-accent-primary mt-1 tabular-nums">
-              {result.summary.total_events}
+              {result.total_events}
             </p>
           </div>
         </div>
@@ -346,7 +346,7 @@ function EvidencePackView({ result, onCopyMarkdown, onDownloadJson, copied }: Ev
 
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
           <div className="flex items-center gap-3">
-            {result.verification.chain_valid ? (
+            {result.verification.chain_verified ? (
               <CheckCircle size={20} className="text-confidence-high" />
             ) : (
               <XCircle size={20} className="text-op-delete" />
@@ -354,7 +354,7 @@ function EvidencePackView({ result, onCopyMarkdown, onDownloadJson, copied }: Ev
             <div>
               <p className="text-sm font-medium text-noir-200">Hash Chain</p>
               <p className="text-xs text-noir-500">
-                {result.verification.chain_valid ? 'Verified' : 'Invalid'}
+                {result.verification.chain_verified ? 'Verified' : 'Invalid'}
               </p>
             </div>
           </div>
@@ -378,9 +378,9 @@ function EvidencePackView({ result, onCopyMarkdown, onDownloadJson, copied }: Ev
             </div>
           </div>
           <div className="flex items-center gap-3">
-            {result.verification.build_passed ? (
+            {result.verification.build_succeeded ? (
               <CheckCircle size={20} className="text-confidence-high" />
-            ) : result.verification.build_passed === false ? (
+            ) : result.verification.build_succeeded === false ? (
               <XCircle size={20} className="text-op-delete" />
             ) : (
               <AlertTriangle size={20} className="text-confidence-medium" />
@@ -388,9 +388,9 @@ function EvidencePackView({ result, onCopyMarkdown, onDownloadJson, copied }: Ev
             <div>
               <p className="text-sm font-medium text-noir-200">Build</p>
               <p className="text-xs text-noir-500">
-                {result.verification.build_passed === true
+                {result.verification.build_succeeded === true
                   ? 'Passed'
-                  : result.verification.build_passed === false
+                  : result.verification.build_succeeded === false
                   ? 'Failed'
                   : 'Not run'}
               </p>
@@ -567,17 +567,17 @@ function generateMarkdown(result: EvidencePackResult): string {
     `| Files Changed | ${result.summary.files_changed} |`,
     `| Lines Added | +${result.summary.lines_added} |`,
     `| Lines Removed | -${result.summary.lines_removed} |`,
-    `| AI Events | ${result.summary.total_events} |`,
-    `| Coverage | ${result.summary.coverage_pct.toFixed(1)}% |`,
+    `| AI Events | ${result.total_events} |`,
+    `| Coverage | ${result.coverage_pct.toFixed(1)}% |`,
     ''
   );
 
   lines.push(
     `## Verification`,
     '',
-    `- Hash Chain: ${result.verification.chain_valid ? '✅ Valid' : '❌ Invalid'}`,
+    `- Hash Chain: ${result.verification.chain_verified ? '✅ Valid' : '❌ Invalid'}`,
     `- Tests: ${result.verification.tests_passed === true ? '✅ Passed' : result.verification.tests_passed === false ? '❌ Failed' : '⚠️ Not run'}`,
-    `- Build: ${result.verification.build_passed === true ? '✅ Passed' : result.verification.build_passed === false ? '❌ Failed' : '⚠️ Not run'}`,
+    `- Build: ${result.verification.build_succeeded === true ? '✅ Passed' : result.verification.build_succeeded === false ? '❌ Failed' : '⚠️ Not run'}`,
     ''
   );
 

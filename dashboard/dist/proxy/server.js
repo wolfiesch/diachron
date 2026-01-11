@@ -51,6 +51,7 @@ app.get('/api/events', asyncHandler(async (req, res) => {
     res.json(events);
 }));
 // Get single event by ID
+// TODO: Add GetEventById IPC message to daemon for efficiency (currently fetches all events)
 app.get('/api/events/:id', asyncHandler(async (req, res) => {
     const eventId = parseInt(req.params.id, 10);
     const events = await queryTimeline({ limit: 1000 });
@@ -63,6 +64,7 @@ app.get('/api/events/:id', asyncHandler(async (req, res) => {
     }
 }));
 // Sessions (aggregated from events)
+// TODO: Add GetSessions IPC message to daemon for efficiency (currently fetches all events and aggregates)
 app.get('/api/sessions', asyncHandler(async (_req, res) => {
     const events = await queryTimeline({ limit: 1000 });
     // Group events by session_id

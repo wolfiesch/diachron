@@ -1221,27 +1221,34 @@ fn main() -> Result<()> {
 
                 std::fs::write(&pid_file, child.id().to_string())?;
 
-                // Wait for server to be ready
-                std::thread::sleep(Duration::from_secs(2));
+                // Poll for server to be ready (up to 10 seconds)
+                let mut ready = false;
+                for _ in 0..20 {
+                    std::thread::sleep(Duration::from_millis(500));
+                    if let Ok(response) = reqwest::blocking::get(&check_url) {
+                        if response.status().is_success() {
+                            ready = true;
+                            break;
+                        }
+                    }
+                }
 
                 // Verify it's running
-                if let Ok(response) = reqwest::blocking::get(&check_url) {
-                    if response.status().is_success() {
-                        println!("   Proxy: http://localhost:{}", port);
+                if ready {
+                    println!("   Proxy: http://localhost:{}", port);
 
-                        // Get daemon stats
-                        if let Ok(IpcResponse::Pong { uptime_secs, events_count }) = send_message(&IpcMessage::Ping) {
-                            println!("   Daemon: Connected (uptime: {}s, {} events)", uptime_secs, events_count);
-                        }
-
-                        if !no_browser {
-                            println!("   Opening browser...");
-                            let _ = open::that(format!("http://localhost:{}", port));
-                        }
-
-                        println!("\n✅ Dashboard running at http://localhost:{}", port);
-                        return Ok(());
+                    // Get daemon stats
+                    if let Ok(IpcResponse::Pong { uptime_secs, events_count }) = send_message(&IpcMessage::Ping) {
+                        println!("   Daemon: Connected (uptime: {}s, {} events)", uptime_secs, events_count);
                     }
+
+                    if !no_browser {
+                        println!("   Opening browser...");
+                        let _ = open::that(format!("http://localhost:{}", port));
+                    }
+
+                    println!("\n✅ Dashboard running at http://localhost:{}", port);
+                    return Ok(());
                 }
 
                 eprintln!("⚠️  Dashboard started but not responding yet");

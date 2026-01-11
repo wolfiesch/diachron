@@ -69,8 +69,6 @@ export interface EvidenceSummary {
   lines_removed: number;
   tool_operations: number;
   sessions: number;
-  total_events: number;
-  coverage_pct: number;
 }
 
 export interface CommitEvidence {
@@ -81,9 +79,9 @@ export interface CommitEvidence {
 }
 
 export interface VerificationStatus {
-  chain_valid: boolean;
+  chain_verified: boolean;
   tests_passed: boolean | null;
-  build_passed: boolean | null;
+  build_succeeded: boolean | null;
   human_reviewed: boolean;
 }
 
