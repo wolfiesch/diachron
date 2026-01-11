@@ -187,9 +187,9 @@ detect_architecture() {
         fi
     fi
 
-    # Check for optional OpenAI key
-    if [[ -n "$OPENAI_API_KEY" ]]; then
-        print_info "OpenAI API key detected (AI summaries available)"
+    # Check for optional Anthropic API key
+    if [[ -n "$ANTHROPIC_API_KEY" ]]; then
+        print_info "Anthropic API key detected (AI summaries available)"
     fi
 
     echo ""
@@ -614,8 +614,8 @@ run_doctor() {
         ((issues++))
     fi
 
-    echo -n "  OpenAI API key: "
-    if [[ -n "$OPENAI_API_KEY" ]]; then
+    echo -n "  Anthropic API key: "
+    if [[ -n "$ANTHROPIC_API_KEY" ]]; then
         echo -e "${GREEN}✅${NC} (AI summaries available)"
     else
         echo -e "${YELLOW}⚠️${NC} (optional, for /timeline --summarize)"

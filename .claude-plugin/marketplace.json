@@ -51,7 +51,7 @@
     "platforms": ["darwin", "linux"]
   },
   "optionalDependencies": {
-    "openai": "AI-powered summaries via /timeline --summarize"
+    "anthropic": "AI-powered summaries via /timeline --summarize (ANTHROPIC_API_KEY)"
   },
   "files": [
     "diachron.md",

@@ -23,7 +23,11 @@ import re
 
 
 def get_project_root() -> Path:
-    """Find project root by looking for .git or .diachron directory."""
+    """Find the project root by walking up for markers.
+
+    Returns:
+        Path to the nearest directory containing `.git` or `.diachron`.
+    """
     current = Path.cwd()
     while current != current.parent:
         if (current / ".git").exists() or (current / ".diachron").exists():
@@ -34,13 +38,13 @@ def get_project_root() -> Path:
 
 
 def get_timestamp() -> tuple[str, str]:
-    """
-    Get current timestamp in both ISO (for sorting) and display (for humans) formats.
+    """Get current timestamps for storage and display.
 
     Returns:
-        tuple of (iso_timestamp, display_timestamp)
-        - iso_timestamp: ISO 8601 format for database sorting/filtering
-        - display_timestamp: Human-readable format from pst-timestamp or fallback
+        A tuple of `(iso_timestamp, display_timestamp)` where:
+        - iso_timestamp: ISO 8601 timestamp for sorting/filtering.
+        - display_timestamp: Human-readable timestamp from `pst-timestamp`
+          or a formatted fallback if unavailable.
     """
     iso_ts = datetime.now().isoformat()
     display_ts = iso_ts  # Fallback
@@ -62,16 +66,26 @@ def get_timestamp() -> tuple[str, str]:
 
 
 def generate_session_id() -> str:
-    """Generate a unique session ID based on timestamp and random bytes."""
+    """Generate a unique session ID.
+
+    Returns:
+        Short SHA256-based session ID string.
+    """
     timestamp = datetime.now().isoformat()
     random_bytes = os.urandom(8).hex()
     return hashlib.sha256(f"{timestamp}-{random_bytes}".encode()).hexdigest()[:12]
 
 
 def get_or_create_session_id(diachron_dir: Path) -> str:
-    """
-    Get existing session ID or create a new one.
-    Session IDs persist for 1 hour to group related events.
+    """Get an existing session ID or create a new one.
+
+    Session IDs persist for one hour to group related events.
+
+    Args:
+        diachron_dir: Directory containing the `.session_id` file.
+
+    Returns:
+        Session ID string.
     """
     import time
 
@@ -101,11 +115,23 @@ def get_or_create_session_id(diachron_dir: Path) -> str:
 
 
 class DiachronDB:
-    """SQLite database interface for Diachron events."""
+    """SQLite database interface for Diachron events.
+
+    Attributes:
+        project_root: Root directory for the current project.
+        diachron_dir: Directory containing Diachron metadata.
+        db_path: Path to the SQLite events database.
+        config_path: Path to the Diachron config JSON.
+    """
 
     SCHEMA_VERSION = 1
 
     def __init__(self, project_root: Optional[Path] = None):
+        """Initialize the database wrapper.
+
+        Args:
+            project_root: Optional project root override.
+        """
         self.project_root = project_root or get_project_root()
         self.diachron_dir = self.project_root / ".diachron"
         self.db_path = self.diachron_dir / "events.db"
@@ -115,17 +141,25 @@ class DiachronDB:
 
     @property
     def session_id(self) -> str:
-        """Get or generate session ID for current session."""
+        """Get or generate the session ID for the current session.
+
+        Returns:
+            Session ID string.
+        """
         if self._session_id is None:
             self._session_id = get_or_create_session_id(self.diachron_dir)
         return self._session_id
 
     def _ensure_dir(self) -> None:
-        """Ensure .diachron directory exists."""
+        """Ensure the `.diachron` directory exists."""
         self.diachron_dir.mkdir(parents=True, exist_ok=True)
 
     def _get_connection(self) -> sqlite3.Connection:
-        """Get or create database connection."""
+        """Get or create a database connection.
+
+        Returns:
+            SQLite connection with row factory set.
+        """
         if self._conn is None:
             self._ensure_dir()
             self._conn = sqlite3.connect(str(self.db_path))
@@ -134,7 +168,7 @@ class DiachronDB:
         return self._conn
 
     def _init_schema(self) -> None:
-        """Initialize database schema if needed."""
+        """Initialize or migrate the database schema if needed."""
         conn = self._conn
         cursor = conn.cursor()
 
@@ -195,10 +229,21 @@ class DiachronDB:
         parent_event_id: Optional[int] = None,
         metadata: Optional[Dict[str, Any]] = None
     ) -> int:
-        """
-        Insert a new event into the database.
+        """Insert a new event into the database.
 
-        Returns the ID of the inserted event.
+        Args:
+            tool_name: Tool that produced the event (Write, Edit, Bash).
+            file_path: Optional file path affected by the event.
+            operation: Operation type (create, modify, delete, commit, etc.).
+            diff_summary: Short diff summary string.
+            raw_input: Raw tool input or command string (possibly truncated).
+            ai_summary: Optional AI-generated summary.
+            git_commit_sha: Optional commit SHA for git operations.
+            parent_event_id: Optional parent event ID for grouping.
+            metadata: Optional structured metadata for the event.
+
+        Returns:
+            The ID of the inserted event.
         """
         conn = self._get_connection()
         cursor = conn.cursor()
@@ -235,19 +280,19 @@ class DiachronDB:
         limit: int = 50,
         offset: int = 0
     ) -> List[Dict[str, Any]]:
-        """
-        Query events with various filters.
+        """Query events with optional filters.
 
         Args:
-            since: Human-readable time like "1 hour ago", "yesterday"
-            until: Human-readable time for upper bound
-            file_path: Filter by file path (supports prefix matching)
-            tool_name: Filter by tool name
-            session_id: Filter by session
-            limit: Max results to return
-            offset: Pagination offset
+            since: Human-readable time like "1 hour ago" or "yesterday".
+            until: Human-readable time for upper bound.
+            file_path: Filter by file path prefix.
+            tool_name: Filter by tool name.
+            session_id: Filter by session ID.
+            limit: Maximum results to return.
+            offset: Pagination offset.
 
-        Returns list of event dictionaries.
+        Returns:
+            List of event dictionaries.
         """
         conn = self._get_connection()
         cursor = conn.cursor()
@@ -295,8 +340,13 @@ class DiachronDB:
         return [dict(row) for row in rows]
 
     def _parse_relative_time(self, time_str: str) -> Optional[datetime]:
-        """
-        Parse relative time strings like "1 hour ago", "yesterday", "2 days ago".
+        """Parse relative time strings.
+
+        Args:
+            time_str: Relative or ISO time string (e.g., "1 hour ago").
+
+        Returns:
+            Parsed datetime or None if parsing fails.
         """
         now = datetime.now()
         time_str = time_str.lower().strip()
@@ -330,7 +380,11 @@ class DiachronDB:
             return None
 
     def get_stats(self) -> Dict[str, Any]:
-        """Get statistics about the events database."""
+        """Get statistics about the events database.
+
+        Returns:
+            Dictionary containing event counts and time range data.
+        """
         conn = self._get_connection()
         cursor = conn.cursor()
 
@@ -364,7 +418,7 @@ class DiachronDB:
         }
 
     def close(self) -> None:
-        """Close database connection."""
+        """Close the database connection if open."""
         if self._conn:
             self._conn.close()
             self._conn = None

@@ -19,6 +19,7 @@ anyhow = { workspace = true }
 interprocess = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+tracing-appender = "0.2"
 dirs = { workspace = true }
 twox-hash = "2"
 diachron-core = { path = "../core" }

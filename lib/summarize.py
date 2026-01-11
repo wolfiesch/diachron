@@ -1,12 +1,32 @@
 #!/usr/bin/env python3
 """
-Diachron AI Summarization Module
-================================
-On-demand AI summaries for timeline events using OpenAI gpt-5-mini.
+Diachron AI Summarization Module (DEPRECATED)
+==============================================
+
+DEPRECATION NOTICE:
+-------------------
+This Python module is DEPRECATED as of v0.6.0.
+
+The Rust daemon (diachrond) now handles summarization using Anthropic's
+Claude API (claude-3-haiku-20240307). This provides:
+  - Faster performance (native async HTTP)
+  - Unified configuration via ~/.diachron/config.toml
+  - Single process for all daemon operations
+
+To use the new summarization:
+  1. Set ANTHROPIC_API_KEY environment variable or config.toml
+  2. Run: diachron memory summarize
+
+This module is kept for backwards compatibility with existing Python tooling.
+It will be removed in a future major version.
+
+---
+
+Legacy module for AI summaries using OpenAI gpt-4o-mini.
 
 Cost: ~$0.00003 per event (~$0.03 per 1000 events)
 
-Usage:
+Usage (DEPRECATED):
     from summarize import DiachronSummarizer
 
     summarizer = DiachronSummarizer()
@@ -28,7 +48,14 @@ from typing import Optional, Dict, Any, List
 openai_client = None
 
 def get_openai_client():
-    """Lazy-load OpenAI client to avoid import overhead on hook path."""
+    """Lazy-load the OpenAI client.
+
+    Returns:
+        Initialized OpenAI client.
+
+    Raises:
+        RuntimeError: If the OpenAI package is missing or initialization fails.
+    """
     global openai_client
     if openai_client is None:
         try:
@@ -52,7 +79,11 @@ TEMPERATURE = 0.3  # Low temperature for consistent, factual summaries
 
 
 def get_project_root() -> Path:
-    """Find project root by looking for .diachron directory."""
+    """Find project root by looking for `.diachron`.
+
+    Returns:
+        Path to the nearest directory containing `.diachron`.
+    """
     current = Path.cwd()
     while current != current.parent:
         if (current / ".diachron").exists():
@@ -62,14 +93,31 @@ def get_project_root() -> Path:
 
 
 class DiachronSummarizer:
-    """AI-powered summarization for timeline events."""
+    """AI-powered summarization for timeline events.
+
+    Attributes:
+        project_root: Root directory for the project.
+        db_path: Path to the Diachron events database.
+    """
 
     def __init__(self, project_root: Optional[Path] = None):
+        """Initialize the summarizer.
+
+        Args:
+            project_root: Optional project root override.
+        """
         self.project_root = project_root or get_project_root()
         self.db_path = self.project_root / ".diachron" / "events.db"
 
     def _get_connection(self) -> sqlite3.Connection:
-        """Get database connection."""
+        """Get a database connection.
+
+        Returns:
+            SQLite connection with row factory set.
+
+        Raises:
+            FileNotFoundError: If the database does not exist.
+        """
         if not self.db_path.exists():
             raise FileNotFoundError(f"Database not found: {self.db_path}")
         conn = sqlite3.connect(str(self.db_path))
@@ -77,7 +125,14 @@ class DiachronSummarizer:
         return conn
 
     def build_prompt(self, event: Dict[str, Any]) -> str:
-        """Build a prompt for summarizing an event."""
+        """Build a prompt for summarizing an event.
+
+        Args:
+            event: Event dictionary to summarize.
+
+        Returns:
+            Prompt string to send to the model.
+        """
         tool = event.get("tool_name", "Unknown")
         file_path = event.get("file_path") or "(no file)"
         operation = event.get("operation", "unknown")
@@ -119,10 +174,13 @@ Change details: {diff_summary}{meta_context}
         return prompt
 
     def summarize_event(self, event: Dict[str, Any]) -> Optional[str]:
-        """
-        Generate an AI summary for a single event.
+        """Generate an AI summary for a single event.
 
-        Returns the summary string or None if summarization fails.
+        Args:
+            event: Event dictionary to summarize.
+
+        Returns:
+            Summary string, or None if summarization fails.
         """
         try:
             client = get_openai_client()
@@ -156,7 +214,14 @@ Change details: {diff_summary}{meta_context}
             return None
 
     def get_unsummarized_events(self, limit: int = 50) -> List[Dict[str, Any]]:
-        """Get events that don't have AI summaries yet."""
+        """Get events that don't have AI summaries yet.
+
+        Args:
+            limit: Maximum number of events to fetch.
+
+        Returns:
+            List of event dictionaries without summaries.
+        """
         conn = self._get_connection()
         cursor = conn.cursor()
 
@@ -172,7 +237,15 @@ Change details: {diff_summary}{meta_context}
         return events
 
     def update_event_summary(self, event_id: int, summary: str) -> bool:
-        """Update an event's ai_summary field."""
+        """Update an event's `ai_summary` field.
+
+        Args:
+            event_id: Event ID to update.
+            summary: Summary text to store.
+
+        Returns:
+            True on success, False on failure.
+        """
         try:
             conn = self._get_connection()
             cursor = conn.cursor()
@@ -191,10 +264,14 @@ Change details: {diff_summary}{meta_context}
             return False
 
     def summarize_pending(self, limit: int = 50, verbose: bool = False) -> int:
-        """
-        Summarize all pending (unsummarized) events.
+        """Summarize all pending (unsummarized) events.
 
-        Returns the number of events successfully summarized.
+        Args:
+            limit: Maximum number of events to summarize.
+            verbose: Whether to print progress output.
+
+        Returns:
+            Number of events successfully summarized.
         """
         events = self.get_unsummarized_events(limit)
 
@@ -232,7 +309,14 @@ Change details: {diff_summary}{meta_context}
         return success_count
 
     def summarize_event_by_id(self, event_id: int) -> Optional[str]:
-        """Summarize a specific event by ID."""
+        """Summarize a specific event by ID.
+
+        Args:
+            event_id: Event ID to summarize.
+
+        Returns:
+            Summary string, or None if the event is missing or fails to summarize.
+        """
         conn = self._get_connection()
         cursor = conn.cursor()
 

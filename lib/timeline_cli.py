@@ -26,7 +26,14 @@ from db import DiachronDB
 
 
 def format_timestamp_str(ts: str) -> str:
-    """Format an ISO timestamp string for display."""
+    """Format a timestamp string for display.
+
+    Args:
+        ts: ISO 8601 timestamp or a preformatted display string.
+
+    Returns:
+        A display-friendly timestamp string.
+    """
     if not ts:
         return "Unknown"
     try:
@@ -39,9 +46,13 @@ def format_timestamp_str(ts: str) -> str:
 
 
 def get_display_timestamp(event: dict) -> str:
-    """
-    Get the display timestamp from an event.
-    Prefers timestamp_display if available, otherwise formats timestamp (ISO).
+    """Resolve the display timestamp for an event.
+
+    Args:
+        event: Event dictionary containing timestamp fields.
+
+    Returns:
+        A human-readable timestamp, preferring `timestamp_display` when present.
     """
     # Prefer the display timestamp if available
     display_ts = event.get("timestamp_display")
@@ -53,7 +64,14 @@ def get_display_timestamp(event: dict) -> str:
 
 
 def parse_metadata(metadata_str: str) -> dict:
-    """Parse metadata JSON string safely."""
+    """Parse metadata JSON safely.
+
+    Args:
+        metadata_str: JSON-encoded metadata string.
+
+    Returns:
+        Parsed metadata dictionary or an empty dict on failure.
+    """
     if not metadata_str:
         return {}
     try:
@@ -63,7 +81,12 @@ def parse_metadata(metadata_str: str) -> dict:
 
 
 def print_timeline(events: list, verbose: bool = False):
-    """Print events in timeline format with metadata."""
+    """Print events in timeline format with metadata.
+
+    Args:
+        events: List of event dictionaries to display.
+        verbose: Whether to print raw input lines for each event.
+    """
     project_name = Path.cwd().name
 
     print(f"\n📍 Timeline for {project_name}")
@@ -132,7 +155,11 @@ def print_timeline(events: list, verbose: bool = False):
 
 
 def print_stats(stats: dict):
-    """Print database statistics."""
+    """Print database statistics.
+
+    Args:
+        stats: Dictionary of stats from the database.
+    """
     print("\n📊 Diachron Statistics")
     print("━" * 55)
     print()
@@ -158,7 +185,12 @@ def print_stats(stats: dict):
 
 
 def export_markdown(events: list, output_path: str = "TIMELINE.md"):
-    """Export events to markdown file."""
+    """Export events to a markdown file.
+
+    Args:
+        events: List of event dictionaries to export.
+        output_path: Output file path for the markdown document.
+    """
     project_name = Path.cwd().name
 
     lines = [
@@ -206,12 +238,24 @@ def export_markdown(events: list, output_path: str = "TIMELINE.md"):
 
 
 def run_summarization(limit: int = 50, verbose: bool = True):
-    """Run AI summarization on unsummarized events."""
+    """Run AI summarization on unsummarized events.
+
+    Args:
+        limit: Maximum number of events to summarize.
+        verbose: Whether to print progress output.
+
+    Returns:
+        Number of events successfully summarized.
+
+    Raises:
+        SystemExit: If the summarizer module cannot be loaded.
+    """
     try:
         from summarize import DiachronSummarizer
     except ImportError as e:
         print(f"Error loading summarizer: {e}", file=sys.stderr)
-        print("Make sure the OpenAI package is installed: pip install openai", file=sys.stderr)
+        print("Note: The Python summarizer is deprecated. Use 'diachron memory summarize' instead.", file=sys.stderr)
+        print("If using legacy mode, install: pip install openai", file=sys.stderr)
         sys.exit(1)
 
     summarizer = DiachronSummarizer()
@@ -220,6 +264,13 @@ def run_summarization(limit: int = 50, verbose: bool = True):
 
 
 def main():
+    """Run the timeline CLI.
+
+    Parses CLI arguments, queries the database, and prints or exports results.
+
+    Raises:
+        SystemExit: For initialization errors or fatal CLI failures.
+    """
     parser = argparse.ArgumentParser(description="View Diachron timeline")
     parser.add_argument("--since", "-s", help="Show events since (e.g., '1 hour ago')")
     parser.add_argument("--until", "-u", help="Show events until")

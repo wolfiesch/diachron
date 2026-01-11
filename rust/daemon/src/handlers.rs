@@ -9,6 +9,8 @@ use diachron_core::{
     fts_search_events, fts_search_exchanges, DiagnosticInfo, IpcMessage, IpcResponse, SearchResult, SearchSource,
 };
 
+use crate::cache::{CacheEntry, CacheKey};
+
 use crate::indexer::{
     build_exchange_embed_text, discover_archives, get_mtime, parse_archive, safe_truncate,
     ArchiveState, IndexState,
@@ -40,6 +42,56 @@ pub async fn handle_message(msg: IpcMessage, state: &Arc<DaemonState>) -> IpcRes
 
             state.request_shutdown();
             IpcResponse::Ok
+        }
+
+        IpcMessage::Maintenance { retention_days } => {
+            info!("Maintenance requested (retention: {} days)", retention_days);
+            let start = std::time::Instant::now();
+
+            // Get size before
+            let size_before = state.db.file_size();
+
+            // Prune old data if retention is set
+            let (events_pruned, exchanges_pruned) = if retention_days > 0 {
+                let events = state.db.prune_old_events(retention_days).unwrap_or(0);
+                let exchanges = state.db.prune_old_exchanges(retention_days).unwrap_or(0);
+                info!("Pruned {} events and {} exchanges", events, exchanges);
+                (events, exchanges)
+            } else {
+                (0, 0)
+            };
+
+            // Run VACUUM and ANALYZE
+            match state.db.vacuum_and_analyze() {
+                Ok(()) => {
+                    let size_after = state.db.file_size();
+                    let duration_ms = start.elapsed().as_millis() as u64;
+
+                    info!(
+                        "Maintenance complete: {} → {} bytes ({:.1}% reduction) in {}ms",
+                        size_before,
+                        size_after,
+                        if size_before > 0 {
+                            (1.0 - size_after as f64 / size_before as f64) * 100.0
+                        } else {
+                            0.0
+                        },
+                        duration_ms
+                    );
+
+                    IpcResponse::MaintenanceStats {
+                        size_before,
+                        size_after,
+                        events_pruned,
+                        exchanges_pruned,
+                        duration_ms,
+                    }
+                }
+                Err(e) => {
+                    error!("Maintenance failed: {}", e);
+                    IpcResponse::Error(format!("Maintenance failed: {}", e))
+                }
+            }
         }
 
         IpcMessage::Capture(event) => {
@@ -343,6 +395,224 @@ pub async fn handle_message(msg: IpcMessage, state: &Arc<DaemonState>) -> IpcRes
                 errors,
             }
         }
+
+        IpcMessage::BlameByFingerprint {
+            file_path,
+            line_number,
+            content,
+            context,
+            mode,
+        } => {
+            use diachron_core::fingerprint::{compute_fingerprint, match_fingerprint};
+
+            info!(
+                "Blame request: {}:{} mode={}",
+                file_path, line_number, mode
+            );
+
+            // Compute fingerprint for the current line content
+            let current_fp = compute_fingerprint(&content, Some(&context), None);
+
+            // Query events that modified this file
+            let conn = state.db.conn.lock().unwrap();
+            let events = match crate::db::query_events_for_file(&conn, &file_path, 100) {
+                Ok(e) => e,
+                Err(e) => {
+                    return IpcResponse::Error(format!("Database error: {}", e));
+                }
+            };
+            drop(conn);
+
+            if events.is_empty() {
+                return IpcResponse::BlameNotFound {
+                    reason: format!(
+                        "No Diachron events found for file: {}. The line may have been written before Diachron was enabled.",
+                        file_path
+                    ),
+                };
+            }
+
+            // Build fingerprint candidates from events with content_hash
+            let conn = state.db.conn.lock().unwrap();
+            let candidates = crate::db::get_event_fingerprints(&conn, &events);
+            drop(conn);
+
+            // Try fingerprint matching first
+            if !candidates.is_empty() {
+                if let Some(fp_match) = match_fingerprint(&current_fp, &candidates, 0.8) {
+                    // Find the matching event
+                    if let Some(matched_event) = events.iter().find(|e| e.id == fp_match.event_id) {
+                        let confidence = match fp_match.match_type {
+                            diachron_core::fingerprint::MatchType::ContentHash => "high",
+                            diachron_core::fingerprint::MatchType::ContextHash => "medium",
+                            diachron_core::fingerprint::MatchType::SemanticSimilarity => "low",
+                        };
+
+                        // Apply mode filtering
+                        let should_return = match mode.as_str() {
+                            "strict" => confidence == "high",
+                            "best-effort" => confidence == "high" || confidence == "medium",
+                            _ => true, // "inferred" accepts all
+                        };
+
+                        if should_return {
+                            // Extract intent from conversation history (v0.5)
+                            let intent = {
+                                let conn = state.db.conn.lock().unwrap();
+                                crate::db::find_intent_for_event(&conn, matched_event, 5)
+                            };
+
+                            return IpcResponse::BlameResult(diachron_core::BlameMatch {
+                                event: matched_event.clone(),
+                                confidence: confidence.to_string(),
+                                match_type: format!("{:?}", fp_match.match_type),
+                                similarity: fp_match.similarity,
+                                intent,
+                            });
+                        }
+                    }
+                }
+            }
+
+            // Fallback to file-path heuristic (inferred confidence)
+            if mode != "strict" {
+                if let Some(best_match) = events.first() {
+                    // Extract intent from conversation history (v0.5)
+                    let intent = {
+                        let conn = state.db.conn.lock().unwrap();
+                        crate::db::find_intent_for_event(&conn, best_match, 5)
+                    };
+
+                    return IpcResponse::BlameResult(diachron_core::BlameMatch {
+                        event: best_match.clone(),
+                        confidence: "inferred".to_string(),
+                        match_type: "file_path".to_string(),
+                        similarity: 0.5,
+                        intent,
+                    });
+                }
+            }
+
+            IpcResponse::BlameNotFound {
+                reason: format!(
+                    "No matching event found for {}:{} with mode '{}'",
+                    file_path, line_number, mode
+                ),
+            }
+        }
+
+        IpcMessage::CorrelateEvidence {
+            pr_id,
+            commits,
+            branch,
+            start_time,
+            end_time,
+            intent,
+        } => {
+            use diachron_core::pr_correlation::correlate_events_to_pr;
+            use diachron_core::{
+                CommitEvidenceResult, EvidencePackResult, EvidenceSummary, VerificationStatusResult,
+            };
+
+            debug!(
+                "CorrelateEvidence: PR #{}, {} commits, branch={}",
+                pr_id,
+                commits.len(),
+                branch
+            );
+
+            // Get database connection
+            let conn = state.db.conn.lock().unwrap();
+
+            // Correlate events to commits
+            match correlate_events_to_pr(&conn, pr_id, &commits, &branch, &start_time, &end_time) {
+                Ok(pr_evidence) => {
+                    // Generate summary
+                    let summary = pr_evidence.summary();
+
+                    // Check verification status from events
+                    let mut tests_executed = false;
+                    let mut build_succeeded = false;
+
+                    for commit in &pr_evidence.commits {
+                        for event in &commit.events {
+                            if event.tool_name == "Bash" {
+                                if let Some(ref metadata) = event.metadata {
+                                    if let Ok(meta) =
+                                        serde_json::from_str::<serde_json::Value>(metadata)
+                                    {
+                                        if let Some(category) =
+                                            meta.get("command_category").and_then(|c| c.as_str())
+                                        {
+                                            if category == "test" {
+                                                tests_executed = true;
+                                            }
+                                            if category == "build" {
+                                                build_succeeded = true;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Verify hash chain
+                    let chain_verified = {
+                        match diachron_core::verify_chain(&conn) {
+                            Ok(verify_result) => verify_result.valid,
+                            Err(_) => false,
+                        }
+                    };
+
+                    drop(conn);
+
+                    // Convert to IPC result types
+                    let commit_results: Vec<CommitEvidenceResult> = pr_evidence
+                        .commits
+                        .into_iter()
+                        .map(|c| CommitEvidenceResult {
+                            sha: c.sha,
+                            message: c.message,
+                            events: c.events,
+                            confidence: c.confidence.as_str().to_string(),
+                        })
+                        .collect();
+
+                    let result = EvidencePackResult {
+                        pr_id,
+                        generated_at: chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+                        diachron_version: env!("CARGO_PKG_VERSION").to_string(),
+                        branch: pr_evidence.branch,
+                        summary: EvidenceSummary {
+                            files_changed: summary.files_changed,
+                            lines_added: summary.lines_added,
+                            lines_removed: summary.lines_removed,
+                            tool_operations: summary.tool_operations,
+                            sessions: summary.sessions,
+                        },
+                        commits: commit_results,
+                        verification: VerificationStatusResult {
+                            chain_verified,
+                            tests_executed,
+                            build_succeeded,
+                            human_reviewed: false,
+                        },
+                        intent,
+                        coverage_pct: pr_evidence.coverage_pct,
+                        unmatched_count: pr_evidence.unmatched_events.len(),
+                        total_events: pr_evidence.total_events,
+                    };
+
+                    IpcResponse::EvidenceResult(result)
+                }
+                Err(e) => {
+                    drop(conn);
+                    error!("Failed to correlate events: {}", e);
+                    IpcResponse::Error(format!("Correlation failed: {}", e))
+                }
+            }
+        }
     }
 }
 
@@ -385,61 +655,111 @@ async fn hybrid_search(
     let since_timestamp = since.and_then(|s| parse_time_filter(s));
 
     debug!("Hybrid search with since={:?}, project={:?}", since_timestamp, project);
-    let mut results = Vec::new();
-    let mut seen_ids = HashSet::new();
 
-    // 1. Vector search (semantic) - if embedding engine available
-    let query_embedding = if let Ok(mut engine_guard) = state.embedding_engine.write() {
-        if let Some(ref mut engine) = *engine_guard {
-            match engine.embed(query) {
-                Ok(emb) => Some(emb),
-                Err(e) => {
-                    warn!("Failed to embed query: {}", e);
-                    None
+    let db_version = state.db.search_version().unwrap_or_else(|_| "e0:x0".to_string());
+    let cache_key = CacheKey {
+        query: query.to_string(),
+        limit,
+        source_filter: source_filter.map(|s| match s {
+            SearchSource::Event => 0,
+            SearchSource::Exchange => 1,
+        }),
+        since: since.map(str::to_string),
+        project: project.map(str::to_string),
+        db_version,
+    };
+
+    if let Ok(mut cache) = state.search_cache.write() {
+        if let Some(entry) = cache.get(&cache_key) {
+            debug!(
+                "Hybrid search returned {} results (vector: {}, fts: {}, cache: hit)",
+                entry.results.len(),
+                entry.embedding_used,
+                true
+            );
+            return entry.results;
+        }
+    }
+
+    let query_vec = query.to_string();
+    let query_fts = query_vec.clone();
+    let source_filter_vec = source_filter;
+    let source_filter_fts = source_filter_vec;
+
+    let state_for_vector = Arc::clone(state);
+    let vector_handle = tokio::task::spawn_blocking(move || {
+        let mut results = Vec::new();
+        let mut embedding_used = false;
+
+        let events_empty = state_for_vector
+            .events_index
+            .read()
+            .map(|idx| idx.is_empty())
+            .unwrap_or(true);
+        let exchanges_empty = state_for_vector
+            .exchanges_index
+            .read()
+            .map(|idx| idx.is_empty())
+            .unwrap_or(true);
+        let should_embed = match source_filter_vec {
+            Some(SearchSource::Event) => !events_empty,
+            Some(SearchSource::Exchange) => !exchanges_empty,
+            None => !(events_empty && exchanges_empty),
+        };
+
+        if !should_embed {
+            return (results, false);
+        }
+
+        let query_embedding = if let Ok(mut engine_guard) = state_for_vector.embedding_engine.write()
+        {
+            if let Some(ref mut engine) = *engine_guard {
+                match engine.embed(&query_vec) {
+                    Ok(emb) => {
+                        embedding_used = true;
+                        Some(emb)
+                    }
+                    Err(e) => {
+                        warn!("Failed to embed query: {}", e);
+                        None
+                    }
                 }
+            } else {
+                None
             }
         } else {
             None
-        }
-    } else {
-        None
-    };
+        };
 
-    if let Some(ref emb) = query_embedding {
-        // Search events vector index
-        if source_filter.is_none() || source_filter == Some(SearchSource::Event) {
-            if let Ok(idx) = state.events_index.read() {
-                match idx.search(emb, limit) {
-                    Ok(vector_results) => {
-                        for vr in vector_results {
-                            // Extract event ID from "event:123" format
-                            if let Some(id_str) = vr.id.strip_prefix("event:") {
-                                if seen_ids.insert(format!("event:{}", id_str)) {
+        if let Some(ref emb) = query_embedding {
+            if source_filter_vec.is_none() || source_filter_vec == Some(SearchSource::Event) {
+                if let Ok(idx) = state_for_vector.events_index.read() {
+                    match idx.search(emb, limit) {
+                        Ok(vector_results) => {
+                            for vr in vector_results {
+                                if let Some(id_str) = vr.id.strip_prefix("event:") {
                                     results.push(SearchResult {
                                         id: id_str.to_string(),
                                         score: vr.score,
                                         source: SearchSource::Event,
-                                        snippet: String::new(), // Will be filled from DB
+                                        snippet: String::new(),
                                         timestamp: String::new(),
                                         project: None,
                                     });
                                 }
                             }
                         }
+                        Err(e) => warn!("Vector search failed: {}", e),
                     }
-                    Err(e) => warn!("Vector search failed: {}", e),
                 }
             }
-        }
 
-        // Search exchanges vector index
-        if source_filter.is_none() || source_filter == Some(SearchSource::Exchange) {
-            if let Ok(idx) = state.exchanges_index.read() {
-                match idx.search(emb, limit) {
-                    Ok(vector_results) => {
-                        for vr in vector_results {
-                            if let Some(id_str) = vr.id.strip_prefix("exchange:") {
-                                if seen_ids.insert(format!("exchange:{}", id_str)) {
+            if source_filter_vec.is_none() || source_filter_vec == Some(SearchSource::Exchange) {
+                if let Ok(idx) = state_for_vector.exchanges_index.read() {
+                    match idx.search(emb, limit) {
+                        Ok(vector_results) => {
+                            for vr in vector_results {
+                                if let Some(id_str) = vr.id.strip_prefix("exchange:") {
                                     results.push(SearchResult {
                                         id: id_str.to_string(),
                                         score: vr.score,
@@ -451,64 +771,100 @@ async fn hybrid_search(
                                 }
                             }
                         }
+                        Err(e) => warn!("Vector search failed: {}", e),
                     }
-                    Err(e) => warn!("Vector search failed: {}", e),
                 }
             }
         }
-    }
 
-    // 2. FTS search (keyword) - use with_conn for thread-safe access
-    // Search events FTS
-    if source_filter.is_none() || source_filter == Some(SearchSource::Event) {
-        // Use with_conn and map the diachron_core::Error to rusqlite::Error
-        let fts_result = state.db.with_conn(|conn| {
-            fts_search_events(conn, query, limit)
-                .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))
-        });
-        match fts_result {
-            Ok(fts_results) => {
-                for fts in fts_results {
-                    let key = format!("event:{}", fts.id);
-                    if seen_ids.insert(key) {
+        (results, embedding_used)
+    });
+
+    let state_for_fts = Arc::clone(state);
+    let fts_handle = tokio::task::spawn_blocking(move || {
+        let mut results = Vec::new();
+        let conn = match state_for_fts.db.open_readonly() {
+            Ok(conn) => conn,
+            Err(e) => {
+                warn!("Failed to open read-only connection for FTS: {}", e);
+                return results;
+            }
+        };
+
+        if source_filter_fts.is_none() || source_filter_fts == Some(SearchSource::Event) {
+            match fts_search_events(&conn, &query_fts, limit) {
+                Ok(fts_results) => {
+                    for fts in fts_results {
                         results.push(SearchResult {
                             id: fts.id,
-                            score: (-fts.score) as f32, // BM25 returns negative scores, convert
+                            score: (-fts.score) as f32,
                             source: SearchSource::Event,
                             snippet: fts.snippet,
                             timestamp: fts.timestamp,
-                            project: fts.context, // file_path for events
+                            project: fts.context,
                         });
                     }
                 }
+                Err(e) => warn!("FTS events search failed: {}", e),
             }
-            Err(e) => warn!("FTS events search failed: {}", e),
         }
-    }
 
-    // Search exchanges FTS
-    if source_filter.is_none() || source_filter == Some(SearchSource::Exchange) {
-        let fts_result = state.db.with_conn(|conn| {
-            fts_search_exchanges(conn, query, limit)
-                .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))
-        });
-        match fts_result {
-            Ok(fts_results) => {
-                for fts in fts_results {
-                    let key = format!("exchange:{}", fts.id);
-                    if seen_ids.insert(key) {
+        if source_filter_fts.is_none() || source_filter_fts == Some(SearchSource::Exchange) {
+            match fts_search_exchanges(&conn, &query_fts, limit) {
+                Ok(fts_results) => {
+                    for fts in fts_results {
                         results.push(SearchResult {
                             id: fts.id,
                             score: (-fts.score) as f32,
                             source: SearchSource::Exchange,
                             snippet: fts.snippet,
                             timestamp: fts.timestamp,
-                            project: fts.context, // project for exchanges
+                            project: fts.context,
                         });
                     }
                 }
+                Err(e) => warn!("FTS exchanges search failed: {}", e),
             }
-            Err(e) => warn!("FTS exchanges search failed: {}", e),
+        }
+
+        results
+    });
+
+    let (vector_results, embedding_used) = match vector_handle.await {
+        Ok((results, used)) => (results, used),
+        Err(e) => {
+            warn!("Vector search task failed: {}", e);
+            (Vec::new(), false)
+        }
+    };
+    let fts_results = match fts_handle.await {
+        Ok(results) => results,
+        Err(e) => {
+            warn!("FTS search task failed: {}", e);
+            Vec::new()
+        }
+    };
+
+    let mut results = Vec::new();
+    let mut seen_ids = HashSet::new();
+
+    for result in vector_results {
+        let key = match result.source {
+            SearchSource::Event => format!("event:{}", result.id),
+            SearchSource::Exchange => format!("exchange:{}", result.id),
+        };
+        if seen_ids.insert(key) {
+            results.push(result);
+        }
+    }
+
+    for result in fts_results {
+        let key = match result.source {
+            SearchSource::Event => format!("event:{}", result.id),
+            SearchSource::Exchange => format!("exchange:{}", result.id),
+        };
+        if seen_ids.insert(key) {
+            results.push(result);
         }
     }
 
@@ -543,10 +899,20 @@ async fn hybrid_search(
     });
     results.truncate(limit);
 
+    if let Ok(mut cache) = state.search_cache.write() {
+        cache.insert(
+            cache_key,
+            CacheEntry {
+                results: results.clone(),
+                embedding_used,
+            },
+        );
+    }
+
     debug!(
-        "Hybrid search returned {} results (vector: {}, fts: {})",
+        "Hybrid search returned {} results (vector: {}, fts: {}, cache: miss)",
         results.len(),
-        query_embedding.is_some(),
+        embedding_used,
         true
     );
 
@@ -593,6 +959,106 @@ fn parse_time_filter(filter: &str) -> Option<String> {
     }
 
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::hybrid_search;
+    use crate::DaemonState;
+    use diachron_core::{CaptureEvent, Exchange, Operation, SearchSource};
+    use std::collections::HashSet;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_dir() -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("diachron-test-{}", nanos));
+        std::fs::create_dir_all(&dir).expect("failed to create temp dir");
+        dir
+    }
+
+    #[tokio::test]
+    async fn test_search_golden_output_and_cache_invalidation() {
+        let dir = temp_dir();
+        let db_path = dir.join("diachron.db");
+        let state = DaemonState::new_for_tests(db_path).expect("test state");
+        let state = Arc::new(state);
+
+        let event = CaptureEvent {
+            tool_name: "Write".to_string(),
+            file_path: Some("src/auth.rs".to_string()),
+            operation: Operation::Create,
+            diff_summary: Some("only_event_token".to_string()),
+            raw_input: Some("auth token added".to_string()),
+            metadata: None,
+            git_commit_sha: None,
+            command_category: None,
+        };
+        let first_id = state.db.save_event(&event, Some("session-1"), None).unwrap();
+
+        let exchange = Exchange {
+            id: "ex-1".to_string(),
+            timestamp: "2026-01-01T00:00:00Z".to_string(),
+            project: Some("test-project".to_string()),
+            session_id: Some("session-1".to_string()),
+            user_message: "only_exchange_token".to_string(),
+            assistant_message: "response".to_string(),
+            tool_calls: None,
+            archive_path: None,
+            line_start: None,
+            line_end: None,
+            embedding: None,
+            summary: None,
+            git_branch: None,
+            cwd: None,
+        };
+        state.db.save_exchange(&exchange, None).unwrap();
+
+        let results = hybrid_search(
+            &state,
+            "only_event_token",
+            10,
+            Some(SearchSource::Event),
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].source, SearchSource::Event);
+        assert_eq!(results[0].id, first_id.to_string());
+
+        // Insert another matching event to ensure cache invalidates.
+        let event2 = CaptureEvent {
+            tool_name: "Write".to_string(),
+            file_path: Some("src/auth2.rs".to_string()),
+            operation: Operation::Modify,
+            diff_summary: Some("only_event_token".to_string()),
+            raw_input: Some("auth token updated".to_string()),
+            metadata: None,
+            git_commit_sha: None,
+            command_category: None,
+        };
+        let second_id = state.db.save_event(&event2, Some("session-2"), None).unwrap();
+
+        let results_after = hybrid_search(
+            &state,
+            "only_event_token",
+            10,
+            Some(SearchSource::Event),
+            None,
+            None,
+        )
+        .await;
+
+        let ids: HashSet<String> = results_after.into_iter().map(|r| r.id).collect();
+        assert_eq!(ids.len(), 2);
+        assert!(ids.contains(&first_id.to_string()));
+        assert!(ids.contains(&second_id.to_string()));
+    }
 }
 
 /// Gather diagnostic information about the daemon state

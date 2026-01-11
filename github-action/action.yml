@@ -1,0 +1,33 @@
+name: 'Diachron PR Narrative'
+description: 'Post AI provenance evidence to pull requests'
+author: 'Wolfgang Schoenberger'
+
+branding:
+  icon: 'git-branch'
+  color: 'purple'
+
+inputs:
+  github-token:
+    description: 'GitHub token for PR comments (usually secrets.GITHUB_TOKEN)'
+    required: true
+  evidence-path:
+    description: 'Path to evidence JSON file'
+    default: 'diachron.evidence.json'
+  comment-mode:
+    description: 'How to handle existing comments: "update" or "new"'
+    default: 'update'
+  fail-on-missing:
+    description: 'Fail workflow if evidence file is missing'
+    default: 'false'
+
+outputs:
+  comment-id:
+    description: 'ID of the created/updated PR comment'
+  coverage:
+    description: 'Event-to-commit coverage percentage'
+  verified:
+    description: 'Whether hash chain is verified'
+
+runs:
+  using: 'node20'
+  main: 'dist/index.js'

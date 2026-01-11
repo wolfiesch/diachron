@@ -197,6 +197,42 @@ pub enum IpcMessage {
 
     /// Shutdown daemon
     Shutdown,
+
+    /// Run database maintenance (VACUUM, ANALYZE, prune old events)
+    Maintenance {
+        /// Prune events older than this many days (0 = no pruning)
+        retention_days: u32,
+    },
+
+    /// Blame a specific file line using fingerprint matching
+    BlameByFingerprint {
+        /// File path being blamed
+        file_path: String,
+        /// Line number to blame
+        line_number: u32,
+        /// Current content of the line
+        content: String,
+        /// Surrounding context (±5 lines)
+        context: String,
+        /// Blame mode: "strict", "best-effort", or "inferred"
+        mode: String,
+    },
+
+    /// Correlate events with PR commits and generate evidence pack
+    CorrelateEvidence {
+        /// Pull request number
+        pr_id: u64,
+        /// Git commit SHAs in the PR
+        commits: Vec<String>,
+        /// Branch name
+        branch: String,
+        /// Start time (ISO timestamp)
+        start_time: String,
+        /// End time (ISO timestamp)
+        end_time: String,
+        /// Optional user intent
+        intent: Option<String>,
+    },
 }
 
 /// Response from daemon.
@@ -225,6 +261,110 @@ pub enum IpcResponse {
         skipped: u64,
         errors: u64,
     },
+    /// Result of database maintenance
+    MaintenanceStats {
+        /// Database size before maintenance (bytes)
+        size_before: u64,
+        /// Database size after maintenance (bytes)
+        size_after: u64,
+        /// Events pruned (if retention enabled)
+        events_pruned: u64,
+        /// Exchanges pruned (if retention enabled)
+        exchanges_pruned: u64,
+        /// Time taken (milliseconds)
+        duration_ms: u64,
+    },
+    /// Result of fingerprint-based blame
+    BlameResult(BlameMatch),
+    /// No blame match found
+    BlameNotFound {
+        reason: String,
+    },
+    /// Result of PR evidence correlation
+    EvidenceResult(EvidencePackResult),
+}
+
+/// Blame match result from fingerprint lookup
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BlameMatch {
+    /// The matched event
+    pub event: StoredEvent,
+    /// Confidence level: "high", "medium", "low", "inferred"
+    pub confidence: String,
+    /// Match type description
+    pub match_type: String,
+    /// Similarity score (0.0 - 1.0)
+    pub similarity: f32,
+    /// User intent if available from conversation
+    pub intent: Option<String>,
+}
+
+/// Evidence pack result from PR correlation
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EvidencePackResult {
+    /// Pull request number
+    pub pr_id: u64,
+    /// When this evidence pack was generated
+    pub generated_at: String,
+    /// Diachron version
+    pub diachron_version: String,
+    /// Branch name
+    pub branch: String,
+    /// Summary statistics
+    pub summary: EvidenceSummary,
+    /// Evidence grouped by commit
+    pub commits: Vec<CommitEvidenceResult>,
+    /// Verification status
+    pub verification: VerificationStatusResult,
+    /// User intent (if provided)
+    pub intent: Option<String>,
+    /// Coverage percentage (events matched to commits)
+    pub coverage_pct: f32,
+    /// Number of unmatched events
+    pub unmatched_count: usize,
+    /// Total events considered
+    pub total_events: u64,
+}
+
+/// Summary statistics for evidence pack
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EvidenceSummary {
+    /// Number of files changed
+    pub files_changed: usize,
+    /// Lines added
+    pub lines_added: usize,
+    /// Lines removed
+    pub lines_removed: usize,
+    /// Number of tool operations
+    pub tool_operations: usize,
+    /// Number of unique sessions
+    pub sessions: usize,
+}
+
+/// Evidence for a single commit
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommitEvidenceResult {
+    /// Git commit SHA
+    pub sha: String,
+    /// Commit message (first line)
+    pub message: Option<String>,
+    /// Events linked to this commit
+    pub events: Vec<StoredEvent>,
+    /// Confidence level: "HIGH", "MEDIUM", "LOW"
+    pub confidence: String,
+}
+
+/// Verification status for evidence pack
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VerificationStatusResult {
+    /// Hash chain integrity verified
+    pub chain_verified: bool,
+    /// Tests were executed after changes
+    pub tests_executed: bool,
+    /// Build succeeded
+    pub build_succeeded: bool,
+    /// Human has reviewed
+    pub human_reviewed: bool,
 }
 
 /// Diagnostic information for doctor command

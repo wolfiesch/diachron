@@ -10,7 +10,7 @@ use rusqlite::Connection;
 use crate::error::Result;
 
 /// Current schema version.
-pub const SCHEMA_VERSION: i32 = 3;
+pub const SCHEMA_VERSION: i32 = 4;
 
 /// Initialize or migrate the database schema.
 ///
@@ -30,6 +30,9 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
     }
     if version < 3 {
         migrate_v3(conn)?;
+    }
+    if version < 4 {
+        migrate_v4(conn)?;
     }
 
     Ok(())
@@ -181,6 +184,40 @@ fn migrate_v3(conn: &Connection) -> Result<()> {
     )?;
 
     set_schema_version(conn, 3)?;
+    Ok(())
+}
+
+/// V4: Add hash-chain tamper evidence and content fingerprinting
+///
+/// This migration adds:
+/// - Hash chain columns (prev_hash, event_hash) for tamper detection
+/// - Content fingerprint columns (content_hash, context_hash) for stable blame
+/// - Chain checkpoints table for daily integrity snapshots
+fn migrate_v4(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "-- Hash chain columns for tamper-evidence
+        ALTER TABLE events ADD COLUMN prev_hash BLOB;
+        ALTER TABLE events ADD COLUMN event_hash BLOB;
+        CREATE INDEX IF NOT EXISTS idx_events_hash ON events(event_hash);
+
+        -- Content fingerprint columns for stable blame
+        ALTER TABLE events ADD COLUMN content_hash BLOB;
+        ALTER TABLE events ADD COLUMN context_hash BLOB;
+        CREATE INDEX IF NOT EXISTS idx_events_content_hash ON events(content_hash);
+
+        -- Chain checkpoints table for daily integrity snapshots
+        CREATE TABLE IF NOT EXISTS chain_checkpoints (
+            id INTEGER PRIMARY KEY,
+            date TEXT NOT NULL,
+            event_count INTEGER NOT NULL,
+            final_hash BLOB NOT NULL,
+            signature BLOB,
+            created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_checkpoints_date ON chain_checkpoints(date);",
+    )?;
+
+    set_schema_version(conn, 4)?;
     Ok(())
 }
 
