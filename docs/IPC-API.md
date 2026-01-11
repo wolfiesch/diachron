@@ -42,6 +42,7 @@ Responses follow the same pattern:
 ```python
 import socket
 import json
+import os
 
 SOCKET_PATH = "~/.diachron/diachron.sock"
 
@@ -535,15 +536,34 @@ async function captureEvent(change: FileChange) {
 Use the IPC API to query provenance in GitHub Actions:
 
 ```yaml
-- name: Generate Evidence Pack
+- name: Get PR Commits
+  id: commits
   run: |
-    echo '{"type":"CorrelateEvidence","payload":{
-      "pr_id": ${{ github.event.pull_request.number }},
-      "commits": ${{ toJson(github.event.pull_request.commits) }},
-      "branch": "${{ github.head_ref }}",
-      "start_time": "2026-01-01T00:00:00Z",
-      "end_time": "2026-01-11T23:59:59Z"
-    }}' | nc -U ~/.diachron/diachron.sock > evidence.json
+    # Get commit SHAs from PR (github.event.pull_request.commits is count, not list)
+    COMMITS=$(gh pr view ${{ github.event.pull_request.number }} --json commits --jq '[.commits[].oid]')
+    echo "commits=$COMMITS" >> $GITHUB_OUTPUT
+
+- name: Generate Evidence Pack
+  env:
+    PR_ID: ${{ github.event.pull_request.number }}
+    COMMITS: ${{ steps.commits.outputs.commits }}
+    BRANCH: ${{ github.head_ref }}
+  run: |
+    # Build JSON payload safely to prevent shell injection from branch names
+    PAYLOAD=$(python3 -c "
+    import json, os
+    print(json.dumps({
+        'type': 'CorrelateEvidence',
+        'payload': {
+            'pr_id': int(os.environ['PR_ID']),
+            'commits': json.loads(os.environ['COMMITS']),
+            'branch': os.environ['BRANCH'],
+            'start_time': '2026-01-01T00:00:00Z',
+            'end_time': '2026-01-11T23:59:59Z'
+        }
+    }))
+    ")
+    printf '%s\n' "$PAYLOAD" | nc -U ~/.diachron/diachron.sock > evidence.json
 ```
 
 ---

@@ -25,9 +25,10 @@ echo "================================================"
 echo ""
 
 # Helper function to time commands in milliseconds
+# Note: Uses direct execution instead of eval for security
 time_ms() {
   local start=$(python3 -c "import time; print(int(time.time() * 1000))")
-  eval "$@" >/dev/null 2>&1
+  "$@" >/dev/null 2>&1
   local end=$(python3 -c "import time; print(int(time.time() * 1000))")
   echo $((end - start))
 }
@@ -248,9 +249,9 @@ echo "" >> "$REPORT"
 echo "## Summary" >> "$REPORT"
 echo "" >> "$REPORT"
 
-# Calculate improvements
-if [[ "$DIACHRON_COLD_START" =~ ^[0-9]+$ ]] && [[ "$EPISODIC_COLD_START" == "2500-3500" ]]; then
-  COLD_IMPROVEMENT=$(echo "scale=0; 3000 / $DIACHRON_COLD_START" | bc)
+# Calculate improvements (with division-by-zero protection)
+if [[ "$DIACHRON_COLD_START" =~ ^[0-9]+$ ]] && [[ "$DIACHRON_COLD_START" -gt 0 ]] && [[ "$EPISODIC_COLD_START" == "2500-3500" ]]; then
+  COLD_IMPROVEMENT=$(echo "scale=0; 3000 / $DIACHRON_COLD_START" | bc 2>/dev/null || echo "N/A")
   COLD_IMPROVEMENT="${COLD_IMPROVEMENT}x faster"
 else
   COLD_IMPROVEMENT="~300x faster"

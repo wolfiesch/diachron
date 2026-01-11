@@ -20,11 +20,9 @@ Usage:
 
 import argparse
 import json
-import os
 import re
 import socket
 import sys
-from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -259,6 +257,7 @@ def parse_codex_jsonl(jsonl_path: Path) -> Dict[str, Any]:
                                     "raw_input": cmd,
                                 })
                     except json.JSONDecodeError:
+                        # Ignore malformed arguments - continue processing other log entries
                         pass
 
     return result

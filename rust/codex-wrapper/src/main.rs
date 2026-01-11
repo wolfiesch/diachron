@@ -136,6 +136,11 @@ fn get_git_branch() -> Option<String> {
 }
 
 /// Find the most recent Codex session JSONL file
+///
+/// NOTE: Known limitation - if multiple Codex commands run concurrently,
+/// this may capture events from the wrong session. A more robust solution
+/// would be to have Codex output its session file path directly, or use
+/// a session ID passed from the wrapper to the capture logic.
 fn find_latest_session() -> Option<PathBuf> {
     let codex_dir = dirs::home_dir()?.join(".codex").join("sessions");
     if !codex_dir.exists() {
