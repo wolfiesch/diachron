@@ -166,6 +166,12 @@ enum Commands {
         #[arg(long, default_value = "0")]
         retention_days: u32,
     },
+
+    /// Web dashboard management
+    Dashboard {
+        #[command(subcommand)]
+        command: DashboardCommands,
+    },
 }
 
 #[derive(Subcommand)]
@@ -228,6 +234,35 @@ enum DaemonCommands {
 
     /// Check daemon status
     Status,
+
+    /// Enable daemon auto-start at login
+    AutostartEnable,
+
+    /// Disable daemon auto-start at login
+    AutostartDisable,
+
+    /// Check auto-start status
+    AutostartStatus,
+}
+
+#[derive(Subcommand)]
+enum DashboardCommands {
+    /// Start the web dashboard
+    Start {
+        /// Port for the dashboard server (default: 3947)
+        #[arg(long, default_value = "3947")]
+        port: u16,
+
+        /// Don't open browser automatically
+        #[arg(long)]
+        no_browser: bool,
+    },
+
+    /// Stop the web dashboard
+    Stop,
+
+    /// Check dashboard status
+    Status,
 }
 
 fn socket_path() -> PathBuf {
@@ -254,6 +289,324 @@ fn send_message(msg: &IpcMessage) -> Result<IpcResponse> {
 
     let response: IpcResponse = serde_json::from_str(&response)?;
     Ok(response)
+}
+
+// ============================================================================
+// Auto-start Management (launchd for macOS, systemd for Linux)
+// ============================================================================
+
+fn get_launchd_plist_path() -> PathBuf {
+    dirs::home_dir()
+        .map(|h| h.join("Library/LaunchAgents/com.diachron.daemon.plist"))
+        .unwrap_or_else(|| PathBuf::from("/tmp/com.diachron.daemon.plist"))
+}
+
+fn get_systemd_service_path() -> PathBuf {
+    dirs::home_dir()
+        .map(|h| h.join(".config/systemd/user/diachron.service"))
+        .unwrap_or_else(|| PathBuf::from("/tmp/diachron.service"))
+}
+
+fn get_install_dir() -> PathBuf {
+    dirs::home_dir()
+        .map(|h| h.join(".claude/skills/diachron"))
+        .unwrap_or_else(|| PathBuf::from("/tmp/diachron"))
+}
+
+fn enable_autostart() -> Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        enable_launchd()?;
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        enable_systemd()?;
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        eprintln!("Auto-start is only supported on macOS and Linux");
+        std::process::exit(1);
+    }
+
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn enable_launchd() -> Result<()> {
+    use std::process::Command;
+
+    let plist_template = get_install_dir().join("install/com.diachron.daemon.plist");
+    let plist_dst = get_launchd_plist_path();
+
+    if !plist_template.exists() {
+        anyhow::bail!("Plist template not found at {:?}", plist_template);
+    }
+
+    // Create LaunchAgents directory
+    if let Some(parent) = plist_dst.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    // Create logs directory
+    if let Some(home) = dirs::home_dir() {
+        std::fs::create_dir_all(home.join(".diachron/logs"))?;
+    }
+
+    // Read template and expand $HOME
+    let template = std::fs::read_to_string(&plist_template)?;
+    let home_str = dirs::home_dir()
+        .map(|h| h.to_string_lossy().to_string())
+        .unwrap_or_else(|| "/tmp".to_string());
+    let expanded = template.replace("$HOME", &home_str);
+
+    // Write expanded plist
+    std::fs::write(&plist_dst, expanded)?;
+
+    // Unload if already loaded
+    let _ = Command::new("launchctl")
+        .args(["unload", &plist_dst.to_string_lossy()])
+        .output();
+
+    // Load the service
+    let output = Command::new("launchctl")
+        .args(["load", &plist_dst.to_string_lossy()])
+        .output()?;
+
+    if output.status.success() {
+        println!("✅ Auto-start enabled (launchd)");
+        println!("   Daemon will start automatically at login");
+        println!("   Status: launchctl list | grep diachron");
+    } else {
+        eprintln!("❌ Failed to load launchd service");
+        eprintln!("{}", String::from_utf8_lossy(&output.stderr));
+        std::process::exit(1);
+    }
+
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn enable_systemd() -> Result<()> {
+    use std::process::Command;
+
+    let service_template = get_install_dir().join("install/diachron.service");
+    let service_dst = get_systemd_service_path();
+
+    if !service_template.exists() {
+        anyhow::bail!("Service template not found at {:?}", service_template);
+    }
+
+    // Create systemd user directory
+    if let Some(parent) = service_dst.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    // Create logs directory
+    if let Some(home) = dirs::home_dir() {
+        std::fs::create_dir_all(home.join(".diachron/logs"))?;
+    }
+
+    // Copy service file
+    std::fs::copy(&service_template, &service_dst)?;
+
+    // Reload systemd
+    let _ = Command::new("systemctl")
+        .args(["--user", "daemon-reload"])
+        .output();
+
+    // Enable and start
+    let output = Command::new("systemctl")
+        .args(["--user", "enable", "--now", "diachron"])
+        .output()?;
+
+    if output.status.success() {
+        println!("✅ Auto-start enabled (systemd)");
+        println!("   Daemon will start automatically at login");
+        println!("   Status: systemctl --user status diachron");
+    } else {
+        eprintln!("❌ Failed to enable systemd service");
+        eprintln!("{}", String::from_utf8_lossy(&output.stderr));
+        std::process::exit(1);
+    }
+
+    Ok(())
+}
+
+fn disable_autostart() -> Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        disable_launchd()?;
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        disable_systemd()?;
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        eprintln!("Auto-start is only supported on macOS and Linux");
+        std::process::exit(1);
+    }
+
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn disable_launchd() -> Result<()> {
+    use std::process::Command;
+
+    let plist_path = get_launchd_plist_path();
+
+    if plist_path.exists() {
+        // Unload the service
+        let _ = Command::new("launchctl")
+            .args(["unload", &plist_path.to_string_lossy()])
+            .output();
+
+        // Remove the plist file
+        std::fs::remove_file(&plist_path)?;
+
+        println!("✅ Auto-start disabled");
+        println!("   Daemon will no longer start at login");
+        println!("   Run 'diachron daemon start' to start manually");
+    } else {
+        println!("ℹ️  Auto-start was not enabled");
+    }
+
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn disable_systemd() -> Result<()> {
+    use std::process::Command;
+
+    let service_path = get_systemd_service_path();
+
+    // Disable and stop
+    let _ = Command::new("systemctl")
+        .args(["--user", "disable", "--now", "diachron"])
+        .output();
+
+    if service_path.exists() {
+        std::fs::remove_file(&service_path)?;
+
+        // Reload systemd
+        let _ = Command::new("systemctl")
+            .args(["--user", "daemon-reload"])
+            .output();
+    }
+
+    println!("✅ Auto-start disabled");
+    println!("   Daemon will no longer start at login");
+    println!("   Run 'diachron daemon start' to start manually");
+
+    Ok(())
+}
+
+fn check_autostart_status() -> Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        check_launchd_status()?;
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        check_systemd_status()?;
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        println!("Auto-start is only supported on macOS and Linux");
+    }
+
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn check_launchd_status() -> Result<()> {
+    use std::process::Command;
+
+    let plist_path = get_launchd_plist_path();
+
+    println!("=== Auto-Start Status (macOS) ===\n");
+
+    if plist_path.exists() {
+        println!("Plist installed: ✅ {}", plist_path.display());
+
+        // Check if loaded
+        let output = Command::new("launchctl")
+            .args(["list"])
+            .output()?;
+
+        let list_output = String::from_utf8_lossy(&output.stdout);
+        if list_output.contains("com.diachron.daemon") {
+            // Parse the line to get PID and status
+            for line in list_output.lines() {
+                if line.contains("com.diachron.daemon") {
+                    let parts: Vec<&str> = line.split_whitespace().collect();
+                    if parts.len() >= 3 {
+                        let pid = parts[0];
+                        let exit_code = parts[1];
+                        if pid == "-" {
+                            println!("Service loaded: ✅ (not running, exit code: {})", exit_code);
+                        } else {
+                            println!("Service running: ✅ PID {} (exit code: {})", pid, exit_code);
+                        }
+                    }
+                    break;
+                }
+            }
+        } else {
+            println!("Service loaded: ❌ Not in launchctl list");
+            println!("\nTo enable: diachron daemon autostart-enable");
+        }
+    } else {
+        println!("Plist installed: ❌");
+        println!("\nTo enable: diachron daemon autostart-enable");
+    }
+
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn check_systemd_status() -> Result<()> {
+    use std::process::Command;
+
+    let service_path = get_systemd_service_path();
+
+    println!("=== Auto-Start Status (Linux) ===\n");
+
+    if service_path.exists() {
+        println!("Service file: ✅ {}", service_path.display());
+
+        // Check if enabled
+        let output = Command::new("systemctl")
+            .args(["--user", "is-enabled", "diachron"])
+            .output()?;
+
+        let enabled = String::from_utf8_lossy(&output.stdout).trim() == "enabled";
+        println!("Service enabled: {}", if enabled { "✅" } else { "❌" });
+
+        // Check if active
+        let output = Command::new("systemctl")
+            .args(["--user", "is-active", "diachron"])
+            .output()?;
+
+        let active = String::from_utf8_lossy(&output.stdout).trim() == "active";
+        println!("Service active: {}", if active { "✅" } else { "❌" });
+
+        if !enabled {
+            println!("\nTo enable: diachron daemon autostart-enable");
+        }
+    } else {
+        println!("Service file: ❌");
+        println!("\nTo enable: diachron daemon autostart-enable");
+    }
+
+    Ok(())
 }
 
 fn main() -> Result<()> {
@@ -753,6 +1106,224 @@ fn main() -> Result<()> {
                     }
                     Ok(_) => {}
                     Err(_) => {
+                        println!("Daemon: Not running");
+                    }
+                }
+            }
+
+            DaemonCommands::AutostartEnable => {
+                enable_autostart()?;
+            }
+
+            DaemonCommands::AutostartDisable => {
+                disable_autostart()?;
+            }
+
+            DaemonCommands::AutostartStatus => {
+                check_autostart_status()?;
+            }
+        },
+
+        Commands::Dashboard { command } => match command {
+            DashboardCommands::Start { port, no_browser } => {
+                // Check if daemon is running first
+                if let Err(_) = send_message(&IpcMessage::Ping) {
+                    eprintln!("⚠️  Daemon is not running. Starting daemon first...");
+                    // Try to start daemon
+                    let daemon_path = std::env::current_exe()?
+                        .parent()
+                        .map(|p| p.join("diachrond"))
+                        .context("Could not determine executable directory")?;
+
+                    if daemon_path.exists() {
+                        let diachron_home = dirs::home_dir()
+                            .context("Could not find home directory")?
+                            .join(".diachron");
+                        std::fs::create_dir_all(&diachron_home)?;
+                        let logs_dir = diachron_home.join("logs");
+                        std::fs::create_dir_all(&logs_dir)?;
+
+                        std::process::Command::new(&daemon_path)
+                            .stdout(std::fs::File::create(logs_dir.join("daemon.out"))?)
+                            .stderr(std::fs::File::create(logs_dir.join("daemon.err"))?)
+                            .spawn()
+                            .context("Failed to start daemon")?;
+
+                        std::thread::sleep(Duration::from_millis(500));
+                    } else {
+                        eprintln!("❌ Daemon binary not found. Run 'diachron daemon start' first.");
+                        std::process::exit(1);
+                    }
+                }
+
+                // Find dashboard directory
+                let dashboard_dir = dirs::home_dir()
+                    .context("Could not find home directory")?
+                    .join(".claude")
+                    .join("skills")
+                    .join("diachron")
+                    .join("dashboard");
+
+                if !dashboard_dir.exists() {
+                    eprintln!("❌ Dashboard not found at {:?}", dashboard_dir);
+                    std::process::exit(1);
+                }
+
+                // Check if already running by trying to connect
+                let check_url = format!("http://localhost:{}/api/health", port);
+                if let Ok(response) = reqwest::blocking::get(&check_url) {
+                    if response.status().is_success() {
+                        println!("✅ Dashboard is already running at http://localhost:{}", port);
+                        if !no_browser {
+                            let _ = open::that(format!("http://localhost:{}", port));
+                        }
+                        return Ok(());
+                    }
+                }
+
+                println!("🚀 Starting Diachron dashboard...");
+
+                // Build if dist/ doesn't exist
+                let dist_dir = dashboard_dir.join("dist");
+                let proxy_dist = dashboard_dir.join("dist").join("proxy");
+
+                if !dist_dir.exists() || !proxy_dist.exists() {
+                    println!("📦 Building dashboard (first run)...");
+                    let build_status = std::process::Command::new("npm")
+                        .current_dir(&dashboard_dir)
+                        .arg("run")
+                        .arg("build")
+                        .status()
+                        .context("Failed to run npm build")?;
+
+                    if !build_status.success() {
+                        eprintln!("❌ Build failed. Run 'cd {} && npm install && npm run build' manually", dashboard_dir.display());
+                        std::process::exit(1);
+                    }
+                }
+
+                // Start the proxy server
+                let diachron_home = dirs::home_dir()
+                    .context("Could not find home directory")?
+                    .join(".diachron");
+                let pid_file = diachron_home.join("dashboard.pid");
+                let log_file = diachron_home.join("logs").join("dashboard.log");
+                std::fs::create_dir_all(diachron_home.join("logs"))?;
+
+                let child = std::process::Command::new("node")
+                    .current_dir(&dashboard_dir)
+                    .arg("dist/proxy/server.js")
+                    .env("PORT", port.to_string())
+                    .stdout(std::fs::File::create(&log_file)?)
+                    .stderr(std::fs::File::create(&log_file)?)
+                    .spawn()
+                    .context("Failed to start dashboard server")?;
+
+                std::fs::write(&pid_file, child.id().to_string())?;
+
+                // Poll for server to be ready (up to 10 seconds)
+                let mut ready = false;
+                for _ in 0..20 {
+                    std::thread::sleep(Duration::from_millis(500));
+                    if let Ok(response) = reqwest::blocking::get(&check_url) {
+                        if response.status().is_success() {
+                            ready = true;
+                            break;
+                        }
+                    }
+                }
+
+                // Verify it's running
+                if ready {
+                    println!("   Proxy: http://localhost:{}", port);
+
+                    // Get daemon stats
+                    if let Ok(IpcResponse::Pong { uptime_secs, events_count }) = send_message(&IpcMessage::Ping) {
+                        println!("   Daemon: Connected (uptime: {}s, {} events)", uptime_secs, events_count);
+                    }
+
+                    if !no_browser {
+                        println!("   Opening browser...");
+                        let _ = open::that(format!("http://localhost:{}", port));
+                    }
+
+                    println!("\n✅ Dashboard running at http://localhost:{}", port);
+                    return Ok(());
+                }
+
+                eprintln!("⚠️  Dashboard started but not responding yet");
+                eprintln!("   Check logs: {}", log_file.display());
+            }
+
+            DashboardCommands::Stop => {
+                let diachron_home = dirs::home_dir()
+                    .context("Could not find home directory")?
+                    .join(".diachron");
+                let pid_file = diachron_home.join("dashboard.pid");
+
+                if pid_file.exists() {
+                    let pid_str = std::fs::read_to_string(&pid_file)?;
+                    if let Ok(pid) = pid_str.trim().parse::<i32>() {
+                        // Kill the process
+                        #[cfg(unix)]
+                        {
+                            let _ = std::process::Command::new("kill")
+                                .arg(pid.to_string())
+                                .status();
+                        }
+                        #[cfg(not(unix))]
+                        {
+                            let _ = std::process::Command::new("taskkill")
+                                .args(&["/PID", &pid.to_string(), "/F"])
+                                .status();
+                        }
+                    }
+                    let _ = std::fs::remove_file(&pid_file);
+                    println!("✅ Dashboard stopped");
+                } else {
+                    println!("Dashboard is not running");
+                }
+            }
+
+            DashboardCommands::Status => {
+                let diachron_home = dirs::home_dir()
+                    .context("Could not find home directory")?
+                    .join(".diachron");
+                let pid_file = diachron_home.join("dashboard.pid");
+
+                // Check if process is running
+                let mut dashboard_running = false;
+                if pid_file.exists() {
+                    // Try to connect
+                    if let Ok(response) = reqwest::blocking::get("http://localhost:3947/api/health") {
+                        if response.status().is_success() {
+                            dashboard_running = true;
+                        }
+                    }
+                }
+
+                if dashboard_running {
+                    println!("Dashboard: Running (http://localhost:3947)");
+                } else {
+                    println!("Dashboard: Not running");
+                    if pid_file.exists() {
+                        let _ = std::fs::remove_file(&pid_file);
+                    }
+                }
+
+                // Also show daemon status
+                match send_message(&IpcMessage::Ping) {
+                    Ok(IpcResponse::Pong { uptime_secs, events_count }) => {
+                        let hours = uptime_secs / 3600;
+                        let mins = (uptime_secs % 3600) / 60;
+                        if hours > 0 {
+                            println!("Daemon: Connected (uptime: {}h {}m)", hours, mins);
+                        } else {
+                            println!("Daemon: Connected (uptime: {}m)", mins);
+                        }
+                        println!("Events: {}", events_count);
+                    }
+                    _ => {
                         println!("Daemon: Not running");
                     }
                 }

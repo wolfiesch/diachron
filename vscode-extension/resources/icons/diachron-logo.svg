@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#1a1a2e"/>
+      <stop offset="100%" style="stop-color:#16213e"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#4CAF50"/>
+      <stop offset="100%" style="stop-color:#2196F3"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Background -->
+  <rect width="128" height="128" rx="24" fill="url(#bg)"/>
+
+  <!-- Timeline representation - vertical line with nodes -->
+  <line x1="44" y1="28" x2="44" y2="100" stroke="url(#accent)" stroke-width="4" stroke-linecap="round"/>
+
+  <!-- Timeline nodes -->
+  <circle cx="44" cy="36" r="8" fill="#4CAF50"/>
+  <circle cx="44" cy="64" r="8" fill="#2196F3"/>
+  <circle cx="44" cy="92" r="8" fill="#9C27B0"/>
+
+  <!-- Code representation - brackets -->
+  <path d="M68 40 L60 64 L68 88" stroke="#ffffff" stroke-width="3" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M84 40 L92 64 L84 88" stroke="#ffffff" stroke-width="3" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <!-- AI indicator -->
+  <text x="76" y="70" font-size="16" font-family="monospace" fill="#4CAF50" text-anchor="middle" font-weight="bold">AI</text>
+</svg>

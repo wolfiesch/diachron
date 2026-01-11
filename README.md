@@ -1,6 +1,6 @@
 # Diachron
 
-[![Version](https://img.shields.io/badge/version-0.7.0-blue.svg)](https://github.com/wolfiesch/diachron)
+[![Version](https://img.shields.io/badge/version-1.0.0-blue.svg)](https://github.com/wolfiesch/diachron)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey.svg)]()
 [![Claude Code](https://img.shields.io/badge/Claude%20Code-2.1%2B-orange.svg)]()
@@ -46,6 +46,8 @@ Diachron uses **Claude Code 2.1's hook architecture** to transparently capture e
 
 - **Automatic Capture** - Every Write, Edit, and Bash command logged
 - **Git Integration** - Captures branch name and commit SHAs
+- **Web Dashboard** - Real-time timeline visualization with filtering (v1.0)
+- **VS Code Extension** - Inline blame on hover with gutter icons (v0.8)
 - **Hash-Chain Integrity** - SHA256 tamper-evidence for every event (v0.3)
 - **PR Narratives** - Generate evidence packs for pull request comments (v0.3)
 - **Semantic Blame** - Find which AI session wrote specific code lines (v0.3)
@@ -117,7 +119,7 @@ See [INSTALL.md](./INSTALL.md) for complete manual installation instructions.
 | `/timeline --summarize` | Generate AI summaries (requires ANTHROPIC_API_KEY) |
 | `/timeline --export markdown` | Export to TIMELINE.md |
 
-### v0.3 Commands
+### CLI Commands
 
 | Command | Description |
 |---------|-------------|
@@ -125,6 +127,13 @@ See [INSTALL.md](./INSTALL.md) for complete manual installation instructions.
 | `diachron export-evidence` | Generate JSON evidence pack |
 | `diachron pr-comment --pr <N>` | Post PR narrative comment via `gh` CLI |
 | `diachron blame <file:line>` | Semantic blame for a code line |
+| `diachron maintenance` | Run database VACUUM/ANALYZE, prune old data |
+| `diachron daemon start` | Start the background daemon |
+| `diachron daemon stop` | Stop the daemon |
+| `diachron daemon status` | Check daemon status |
+| `diachron dashboard start` | Start web dashboard at localhost:3947 |
+| `diachron dashboard stop` | Stop web dashboard |
+| `diachron dashboard status` | Check dashboard and daemon status |
 
 ## Timeline Output
 
@@ -289,6 +298,98 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 ```
 
+## Web Dashboard (v1.0)
+
+A real-time web interface for exploring your AI provenance timeline.
+
+### Starting the Dashboard
+
+```bash
+# Start the dashboard (opens browser automatically)
+$ diachron dashboard start
+🚀 Starting Diachron dashboard...
+   Proxy: http://localhost:3947
+   Daemon: Connected (uptime: 6576s, 871 events)
+✅ Dashboard running at http://localhost:3947
+
+# Check status
+$ diachron dashboard status
+Dashboard: Running (http://localhost:3947)
+Daemon: Connected (uptime: 1h 49m)
+Events: 871
+
+# Stop the dashboard
+$ diachron dashboard stop
+✅ Dashboard stopped
+```
+
+### Dashboard Pages
+
+| Page | URL | Description |
+|------|-----|-------------|
+| **Dashboard** | `/` | Overview with stat cards, recent activity, quick actions |
+| **Timeline** | `/timeline` | Filterable event list with virtual scrolling |
+| **Sessions** | `/sessions` | Browse AI sessions and their events |
+| **Search** | `/search` | Semantic + keyword search across events |
+| **Blame** | `/blame` | Interactive code attribution lookup |
+| **Evidence** | `/evidence` | PR evidence pack viewer |
+| **Diagnostics** | `/doctor` | Daemon health, database stats |
+
+### Features
+
+- **Real-time updates** via WebSocket - new events appear automatically
+- **Virtual scrolling** - handles 10K+ events smoothly
+- **Time filters** - Last hour, 24h, 7 days, 30 days, all time
+- **Tool filters** - Claude, Codex, Bash, or all
+- **File path search** - Filter events by file/directory
+- **Event detail drawer** - Slide-in panel with full event details
+
+### Design
+
+The dashboard uses a "Terminal Noir" dark theme optimized for developers:
+- Dark background (`#0a0a0b`) with subtle accents
+- Confidence colors: Green (HIGH), Amber (MEDIUM), Gray (LOW), Purple (INFERRED)
+- JetBrains Mono for code, Inter for UI text
+- Framer Motion animations for smooth transitions
+
+## VS Code Extension (v0.8)
+
+Get AI provenance directly in your editor with inline blame on hover.
+
+### Installation
+
+```bash
+# From marketplace (coming soon)
+code --install-extension wolfiesch.diachron
+
+# Or install local VSIX
+code --install-extension ~/.claude/skills/diachron/vscode-extension/diachron-0.8.0.vsix
+```
+
+### Features
+
+- **Hover blame** - See AI provenance when hovering over code lines
+- **Gutter icons** - Visual indicators for AI-written lines (green/yellow/gray)
+- **Timeline sidebar** - Browse recent events in the Explorer panel
+- **Session details** - View full session context in dedicated panel
+
+### Hover Card
+
+When you hover over AI-modified code:
+
+```
+┌────────────────────────────────────────┐
+│ 🤖 Claude Code                         │
+│ Session: abc123 • 2 hours ago          │
+├────────────────────────────────────────┤
+│ 💬 "Fix the 401 errors on page refresh"│
+├────────────────────────────────────────┤
+│ 📊 HIGH confidence                     │
+│ ├─ Content hash match                  │
+│ └─ Same session context                │
+└────────────────────────────────────────┘
+```
+
 ## Configuration
 
 Edit `.diachron/config.json`:
@@ -423,11 +524,14 @@ The IPC API (see `docs/IPC-API.md`) enables community integrations for:
 - [x] ~~Semantic search + conversation memory~~ (v0.2)
 - [x] ~~Hash-chain tamper evidence~~ (v0.3)
 - [x] ~~PR narrative generation~~ (v0.3)
-- [x] ~~Semantic blame~~ (v0.3/v0.4 preview)
+- [x] ~~Semantic blame~~ (v0.4)
+- [x] ~~Intent extraction from conversations~~ (v0.5)
+- [x] ~~Log rotation + database maintenance~~ (v0.6)
 - [x] ~~Multi-assistant support (Codex)~~ (v0.7)
-- [ ] Web dashboard visualization
+- [x] ~~VS Code extension with inline blame~~ (v0.8)
+- [x] ~~Web dashboard visualization~~ (v1.0)
 - [ ] Team sync (cloud option)
-- [ ] VS Code extension
+- [ ] Multi-project support
 
 ## License
 
