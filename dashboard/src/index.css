@@ -1,0 +1,356 @@
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@300;400;500;600;700&family=JetBrains+Mono:wght@300;400;500;600;700&family=Space+Grotesk:wght@400;500;600;700&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    /* Terminal Noir palette */
+    --background: 18 18 27;
+    --foreground: 238 238 240;
+    --muted: 57 57 64;
+    --muted-foreground: 145 145 159;
+    --accent: 99 102 241;
+    --accent-foreground: 255 255 255;
+
+    /* Glow effects */
+    --glow-color: 99 102 241;
+    --glow-strength: 0.3;
+
+    /* Scanline effect */
+    --scanline-opacity: 0.03;
+  }
+
+  * {
+    @apply border-noir-800;
+  }
+
+  html {
+    @apply antialiased;
+    font-feature-settings: 'liga' 1, 'calt' 1;
+  }
+
+  body {
+    @apply bg-noir-950 text-noir-100 font-sans;
+    background-image:
+      linear-gradient(180deg, rgba(18, 18, 27, 0.97) 0%, rgba(18, 18, 27, 1) 100%),
+      url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.02'/%3E%3C/svg%3E");
+  }
+
+  /* Custom scrollbar */
+  ::-webkit-scrollbar {
+    @apply w-2 h-2;
+  }
+
+  ::-webkit-scrollbar-track {
+    @apply bg-noir-900;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    @apply bg-noir-700 rounded-full;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    @apply bg-noir-600;
+  }
+
+  /* Selection */
+  ::selection {
+    @apply bg-accent-primary/30 text-white;
+  }
+}
+
+@layer components {
+  /* Scanline overlay effect */
+  .scanline-overlay {
+    pointer-events: none;
+    position: fixed;
+    inset: 0;
+    z-index: 9999;
+    background: repeating-linear-gradient(
+      0deg,
+      transparent,
+      transparent 2px,
+      rgba(0, 0, 0, 0.03) 2px,
+      rgba(0, 0, 0, 0.03) 4px
+    );
+  }
+
+  /* Glowing orb indicator */
+  .glow-orb {
+    @apply relative w-2 h-2 rounded-full;
+  }
+
+  .glow-orb::before {
+    content: '';
+    @apply absolute inset-0 rounded-full animate-pulse-slow;
+    background: inherit;
+    filter: blur(4px);
+    opacity: 0.6;
+  }
+
+  .glow-orb-high {
+    @apply bg-confidence-high;
+  }
+
+  .glow-orb-medium {
+    @apply bg-confidence-medium;
+  }
+
+  .glow-orb-low {
+    @apply bg-confidence-low;
+  }
+
+  .glow-orb-inferred {
+    @apply bg-confidence-inferred;
+  }
+
+  /* Card with subtle glow on hover */
+  .card-noir {
+    @apply bg-noir-900/50 border border-noir-800 rounded-lg backdrop-blur-sm;
+    @apply transition-all duration-300;
+  }
+
+  .card-noir:hover {
+    @apply border-accent-primary/30 shadow-glow-sm;
+  }
+
+  /* Stat card */
+  .stat-card {
+    @apply card-noir p-5 relative overflow-hidden;
+  }
+
+  .stat-card::before {
+    content: '';
+    @apply absolute inset-0 bg-gradient-to-br from-accent-primary/5 to-transparent;
+    @apply opacity-0 transition-opacity duration-300;
+  }
+
+  .stat-card:hover::before {
+    @apply opacity-100;
+  }
+
+  /* Nav item */
+  .nav-item {
+    @apply flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium;
+    @apply text-noir-400 transition-all duration-200;
+  }
+
+  .nav-item:hover {
+    @apply text-noir-100 bg-noir-800/50;
+  }
+
+  .nav-item.active {
+    @apply text-accent-primary bg-accent-primary/10;
+  }
+
+  /* Badge */
+  .badge {
+    @apply inline-flex items-center px-2 py-0.5 rounded text-xs font-mono font-medium;
+  }
+
+  .badge-high {
+    @apply bg-confidence-high/20 text-confidence-high;
+  }
+
+  .badge-medium {
+    @apply bg-confidence-medium/20 text-confidence-medium;
+  }
+
+  .badge-low {
+    @apply bg-confidence-low/20 text-confidence-low;
+  }
+
+  .badge-inferred {
+    @apply bg-confidence-inferred/20 text-confidence-inferred;
+  }
+
+  /* Tool badge */
+  .badge-claude {
+    @apply bg-tool-claude/20 text-tool-claude;
+  }
+
+  .badge-codex {
+    @apply bg-tool-codex/20 text-tool-codex;
+  }
+
+  .badge-aider {
+    @apply bg-tool-aider/20 text-tool-aider;
+  }
+
+  .badge-cursor {
+    @apply bg-tool-cursor/20 text-tool-cursor;
+  }
+
+  /* Operation badge */
+  .badge-create {
+    @apply bg-op-create/20 text-op-create;
+  }
+
+  .badge-modify {
+    @apply bg-op-modify/20 text-op-modify;
+  }
+
+  .badge-delete {
+    @apply bg-op-delete/20 text-op-delete;
+  }
+
+  .badge-commit {
+    @apply bg-op-commit/20 text-op-commit;
+  }
+
+  .badge-execute {
+    @apply bg-op-execute/20 text-op-execute;
+  }
+
+  /* Input field */
+  .input-noir {
+    @apply w-full px-4 py-2 rounded-lg bg-noir-900 border border-noir-700;
+    @apply text-noir-100 placeholder:text-noir-500;
+    @apply focus:outline-none focus:border-accent-primary focus:ring-1 focus:ring-accent-primary/30;
+    @apply transition-all duration-200;
+  }
+
+  /* Button */
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 px-4 py-2 rounded-lg;
+    @apply text-sm font-medium transition-all duration-200;
+    @apply focus:outline-none focus:ring-2 focus:ring-accent-primary/50;
+  }
+
+  .btn-primary {
+    @apply bg-accent-primary text-white hover:bg-accent-primary/90;
+    @apply shadow-glow-sm hover:shadow-glow-md;
+  }
+
+  .btn-secondary {
+    @apply bg-noir-800 text-noir-100 hover:bg-noir-700;
+    @apply border border-noir-700;
+  }
+
+  .btn-ghost {
+    @apply text-noir-400 hover:text-noir-100 hover:bg-noir-800/50;
+  }
+
+  /* Drawer */
+  .drawer {
+    @apply fixed inset-y-0 right-0 w-[480px] max-w-full;
+    @apply bg-noir-900/95 backdrop-blur-xl border-l border-noir-800;
+    @apply transform transition-transform duration-300 ease-out;
+    @apply z-50;
+  }
+
+  .drawer-enter {
+    @apply translate-x-full;
+  }
+
+  .drawer-enter-active {
+    @apply translate-x-0;
+  }
+
+  .drawer-exit {
+    @apply translate-x-0;
+  }
+
+  .drawer-exit-active {
+    @apply translate-x-full;
+  }
+
+  /* Table */
+  .table-noir {
+    @apply w-full text-sm;
+  }
+
+  .table-noir th {
+    @apply text-left text-xs font-mono uppercase tracking-wider text-noir-500;
+    @apply py-3 px-4 border-b border-noir-800;
+  }
+
+  .table-noir td {
+    @apply py-3 px-4 border-b border-noir-800/50;
+  }
+
+  .table-noir tr:hover td {
+    @apply bg-noir-800/30;
+  }
+
+  /* Code block */
+  .code-block {
+    @apply font-mono text-sm bg-noir-900 rounded-lg p-4 overflow-x-auto;
+    @apply border border-noir-800;
+  }
+
+  /* Tooltip */
+  .tooltip {
+    @apply absolute z-50 px-3 py-2 text-sm rounded-lg;
+    @apply bg-noir-800 border border-noir-700 shadow-lg;
+    @apply animate-fade-in;
+  }
+
+  /* Loading skeleton */
+  .skeleton {
+    @apply animate-pulse bg-noir-800 rounded;
+  }
+
+  /* Status indicator */
+  .status-indicator {
+    @apply inline-flex items-center gap-2;
+  }
+
+  .status-dot {
+    @apply w-2 h-2 rounded-full;
+  }
+
+  .status-dot-connected {
+    @apply bg-confidence-high animate-pulse-slow;
+  }
+
+  .status-dot-disconnected {
+    @apply bg-op-delete;
+  }
+
+  /* Monospace display for IDs, hashes, etc. */
+  .mono-value {
+    @apply font-mono text-xs bg-noir-800/50 px-2 py-0.5 rounded;
+    @apply text-noir-300;
+  }
+
+  /* File path display */
+  .file-path {
+    @apply font-mono text-sm text-accent-secondary;
+  }
+
+  /* Diff summary */
+  .diff-plus {
+    @apply text-op-create;
+  }
+
+  .diff-minus {
+    @apply text-op-delete;
+  }
+}
+
+@layer utilities {
+  /* Text gradient */
+  .text-gradient {
+    @apply bg-gradient-to-r from-accent-primary to-accent-secondary bg-clip-text text-transparent;
+  }
+
+  /* Subtle noise texture */
+  .noise-texture {
+    background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.7' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.02'/%3E%3C/svg%3E");
+  }
+
+  /* Fade mask for long lists */
+  .fade-bottom {
+    mask-image: linear-gradient(to bottom, black 80%, transparent 100%);
+  }
+
+  /* Stagger animation delay utilities */
+  .stagger-1 { animation-delay: 50ms; }
+  .stagger-2 { animation-delay: 100ms; }
+  .stagger-3 { animation-delay: 150ms; }
+  .stagger-4 { animation-delay: 200ms; }
+  .stagger-5 { animation-delay: 250ms; }
+}
