@@ -17,3 +17,4 @@ interprocess = { workspace = true }
 dirs = { workspace = true }
 diachron-core = { path = "../core" }
 toml = "0.8"
+regex = "1"  # T4-2: Line number pattern matching

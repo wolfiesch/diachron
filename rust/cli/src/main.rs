@@ -965,13 +965,24 @@ fn parse_toml_value(s: &str) -> toml::Value {
 /// - Max 1500 tokens (~6000 chars)
 /// - Summarized snippets (first 200 chars each)
 /// - Formatted as markdown for Claude to parse
+///
+/// T4 Quality Fixes (01/10/2026):
+/// - T4-1: Strip HTML tags (<b>, </b>)
+/// - T4-2: Clean line prefixes (N→)
+/// - T4-3: Filter tool wrappers ([Result:, Shell cwd)
+/// - T4-4: Deduplicate results
+/// - T4-5: Quality threshold (score > 5.0)
 fn format_context_output(results: &[diachron_core::SearchResult]) {
+    use std::collections::HashSet;
+
     const MAX_CHARS: usize = 6000; // ~1500 tokens
     const SNIPPET_MAX: usize = 200;
+    const MIN_SCORE: f32 = 5.0; // T4-5: Quality threshold
 
     let mut output = String::new();
     let mut char_count = 0;
     let mut included_count = 0;
+    let mut seen_snippets: HashSet<String> = HashSet::new(); // T4-4: Deduplication
 
     // Header
     let header = "## Prior Context from This Project\n\n";
@@ -979,6 +990,31 @@ fn format_context_output(results: &[diachron_core::SearchResult]) {
     char_count += header.len();
 
     for result in results {
+        // T4-5: Skip low-quality results
+        if result.score < MIN_SCORE {
+            continue;
+        }
+
+        // T4-3: Skip results that are primarily tool output noise
+        if is_tool_noise(&result.snippet) {
+            continue;
+        }
+
+        // Clean the snippet (T4-1, T4-2, T4-3)
+        let cleaned = clean_snippet(&result.snippet);
+
+        // Skip if cleaned snippet is too short (likely all noise)
+        if cleaned.len() < 20 {
+            continue;
+        }
+
+        // T4-4: Skip duplicates (check first 50 chars for similarity)
+        let dedup_key = safe_truncate(&cleaned, 50).to_lowercase();
+        if seen_snippets.contains(&dedup_key) {
+            continue;
+        }
+        seen_snippets.insert(dedup_key);
+
         // Format each result as a compact entry
         let date = if result.timestamp.len() >= 10 {
             &result.timestamp[..10] // YYYY-MM-DD
@@ -992,12 +1028,11 @@ fn format_context_output(results: &[diachron_core::SearchResult]) {
         };
 
         // Truncate snippet safely (UTF-8 aware)
-        let snippet = safe_truncate(&result.snippet, SNIPPET_MAX);
-        let snippet_clean = snippet.replace('\n', " ").trim().to_string();
+        let snippet_final = safe_truncate(&cleaned, SNIPPET_MAX);
 
         let entry = format!(
             "### {} - {}\n{}\n\n",
-            date, source_str, snippet_clean
+            date, source_str, snippet_final
         );
 
         // Check token budget
@@ -1008,6 +1043,11 @@ fn format_context_output(results: &[diachron_core::SearchResult]) {
         output.push_str(&entry);
         char_count += entry.len();
         included_count += 1;
+    }
+
+    // Only output if we have meaningful content
+    if included_count == 0 {
+        return; // Silent - no quality context found
     }
 
     // Footer with stats (helps user understand what was injected)
@@ -1023,6 +1063,115 @@ fn format_context_output(results: &[diachron_core::SearchResult]) {
     }
 
     print!("{}", output);
+}
+
+/// Clean a snippet by removing artifacts and noise.
+/// T4-1: Strip HTML tags
+/// T4-2: Clean line prefixes
+/// T4-3: Filter tool wrappers
+fn clean_snippet(s: &str) -> String {
+    let mut result = s.to_string();
+
+    // T4-1: Strip HTML tags from FTS highlighting
+    result = result.replace("<b>", "");
+    result = result.replace("</b>", "");
+    result = result.replace("<em>", "");
+    result = result.replace("</em>", "");
+
+    // T4-2: Remove line number prefixes (e.g., "1→", "42→")
+    // Pattern: digits followed by → at start of line or after whitespace
+    let re_line_nums = regex::Regex::new(r"(\s|^)\d+→").unwrap_or_else(|_| {
+        // Fallback: simple replacement
+        regex::Regex::new(r"\d+→").unwrap()
+    });
+    result = re_line_nums.replace_all(&result, " ").to_string();
+
+    // T4-3: Remove tool output wrappers
+    // Remove [Result: prefix
+    if result.starts_with("[Result:") {
+        if let Some(pos) = result.find(']') {
+            result = result[pos + 1..].to_string();
+        }
+    }
+    result = result.replace("[Result:", "");
+    result = result.replace("...]", "");
+
+    // T4-3: Remove shell noise
+    let shell_patterns = [
+        "Shell cwd was reset to",
+        "Shell cwd: ",
+        "<system-reminder>",
+        "</system-reminder>",
+    ];
+    for pattern in &shell_patterns {
+        if let Some(pos) = result.find(pattern) {
+            // Remove from pattern to end of line
+            if let Some(newline) = result[pos..].find('\n') {
+                result = format!("{}{}", &result[..pos], &result[pos + newline..]);
+            } else {
+                result = result[..pos].to_string();
+            }
+        }
+    }
+
+    // Normalize whitespace
+    result = result.replace('\n', " ");
+    result = result.split_whitespace().collect::<Vec<_>>().join(" ");
+
+    result.trim().to_string()
+}
+
+/// Check if a snippet is primarily tool output noise.
+fn is_tool_noise(s: &str) -> bool {
+    // Check for tool result wrappers at the start
+    if s.starts_with("[Result:") || s.starts_with("[Tool:") {
+        return true;
+    }
+
+    // Check for internal/system messages
+    let noise_starts = [
+        "Warmup",
+        "Stop hook feedback",
+        "Analyze this conversation",
+        "You MUST call",
+        "This session is being continued",
+        "<function_calls>",
+        "```json",
+        "I'm Claude Code",
+        "I'm ready to help",
+    ];
+    for pattern in &noise_starts {
+        if s.starts_with(pattern) {
+            return true;
+        }
+    }
+
+    // Check for error indicators
+    let noise_contains = [
+        "Shell cwd was reset",
+        "401 {\"type\":\"error\"",
+        "authentication_error",
+        "Failed to find element",
+        "Permission denied",
+        "No such file",
+        "command not found",
+        "<system-reminder>",
+        "hookSpecificOutput",
+    ];
+    for indicator in &noise_contains {
+        if s.contains(indicator) {
+            return true;
+        }
+    }
+
+    // Skip if mostly line numbers (file content dump)
+    let arrow_count = s.matches('→').count();
+    let char_count = s.len();
+    if arrow_count > 3 && (arrow_count * 15) > char_count {
+        return true;
+    }
+
+    false
 }
 
 /// Safely truncate a string at a UTF-8 character boundary.
