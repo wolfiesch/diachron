@@ -45,7 +45,7 @@ The installer automatically handles everything:
 | macOS/Linux | Any | Windows is untested |
 
 **Optional:**
-- OpenAI API key (for AI-powered summaries via `/timeline --summarize`)
+- Anthropic API key (for AI-powered summaries via `/timeline --summarize`)
 - Rust 1.70+ (for building from source on non-ARM64 systems)
 
 ---
@@ -272,7 +272,7 @@ After installation:
 2. Work normally - events are captured automatically
 3. Run `/timeline` to see your history
 4. Check `/timeline --stats` for statistics
-5. Try `/timeline --summarize` for AI-powered summaries (requires OpenAI API key)
+5. Try `/timeline --summarize` for AI-powered summaries (requires ANTHROPIC_API_KEY)
 
 See [README.md](./README.md) for full usage documentation.
 

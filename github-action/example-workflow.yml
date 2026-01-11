@@ -1,0 +1,53 @@
+# Example: .github/workflows/diachron.yml
+#
+# This workflow posts AI provenance evidence to pull requests.
+# It requires a diachron.evidence.json file to be committed to your repo.
+#
+# Prerequisites:
+# 1. Run `diachron export-evidence` locally before pushing
+# 2. Commit the diachron.evidence.json file with your PR
+#
+# Alternatively, use the Diachron CLI in your CI to generate evidence:
+# - run: diachron export-evidence --pr ${{ github.event.pull_request.number }}
+
+name: Diachron PR Narrative
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  pull-requests: write  # Required to post comments
+
+jobs:
+  post-evidence:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # Option 1: Use pre-committed evidence file
+      - name: Post Diachron evidence
+        uses: wolfiesch/diachron/github-action@main
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          evidence-path: 'diachron.evidence.json'
+          comment-mode: 'update'  # Update existing comment if present
+          fail-on-missing: 'false'  # Don't fail if no evidence file
+
+      # Option 2: Generate evidence in CI (requires diachron CLI)
+      # - name: Install Diachron
+      #   run: cargo install diachron
+      #
+      # - name: Generate evidence
+      #   run: |
+      #     diachron export-evidence \
+      #       --pr ${{ github.event.pull_request.number }} \
+      #       --branch ${{ github.head_ref }} \
+      #       --output diachron.evidence.json
+      #
+      # - name: Post evidence
+      #   uses: wolfiesch/diachron/github-action@main
+      #   with:
+      #     github-token: ${{ secrets.GITHUB_TOKEN }}

@@ -6,6 +6,7 @@ members = [
     "cli",
     "core",
     "embeddings",
+    "codex-wrapper",
 ]
 
 [workspace.package]
@@ -35,6 +36,10 @@ clap = { version = "4", features = ["derive"] }
 # Error handling
 thiserror = "1"
 anyhow = "1"
+
+# Cryptography (hash chain)
+sha2 = "0.10"
+hex = "0.4"
 
 # IPC
 interprocess = "2"

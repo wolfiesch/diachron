@@ -21,6 +21,14 @@ from db import DiachronDB
 
 
 def main():
+    """Capture a Diachron event from CLI arguments.
+
+    Parses CLI flags, verifies the project is initialized, and inserts the
+    event into the local Diachron database.
+
+    Raises:
+        SystemExit: Exits with a status code for normal termination or errors.
+    """
     parser = argparse.ArgumentParser(description="Capture a Diachron event")
     parser.add_argument("--tool", "-t", required=True, help="Tool name (Write, Edit, Bash)")
     parser.add_argument("--file", "-f", default=None, help="File path affected")

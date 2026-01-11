@@ -15,10 +15,19 @@ DIACHRON_HOOK="$SKILL_DIR/rust/target/release/diachron-hook"
 DIACHROND="$SKILL_DIR/rust/target/release/diachrond"
 
 # Thresholds for CI (fail if exceeded)
+# P95/P99 thresholds are baseline values with headroom to reduce noise.
 THRESHOLD_CLI_COLD_START_MS=50
+THRESHOLD_CLI_COLD_START_P95_MS=325
+THRESHOLD_CLI_COLD_START_P99_MS=330
 THRESHOLD_SEARCH_MS=100
+THRESHOLD_SEARCH_P95_MS=640
+THRESHOLD_SEARCH_P99_MS=805
 THRESHOLD_HOOK_MS=20
+THRESHOLD_HOOK_P95_MS=20
+THRESHOLD_HOOK_P99_MS=34
 THRESHOLD_MEMORY_MB=200
+THRESHOLD_IPC_P95_MS=145
+THRESHOLD_IPC_P99_MS=210
 
 # Parse arguments
 CI_MODE=false
@@ -70,6 +79,50 @@ print_result() {
     fi
 }
 
+get_percentiles() {
+    local path="$1"
+    python3 - "$path" <<'PY'
+import json
+import math
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+if not path.exists() or path.stat().st_size == 0:
+    print("N/A N/A N/A")
+    raise SystemExit(0)
+
+data = json.loads(path.read_text())
+times = data.get("results", [{}])[0].get("times", [])
+if not times:
+    print("N/A N/A N/A")
+    raise SystemExit(0)
+
+def pct(vals, p):
+    vals = sorted(vals)
+    k = (len(vals) - 1) * (p / 100)
+    f = math.floor(k)
+    c = math.ceil(k)
+    if f == c:
+        return vals[int(k)]
+    return vals[f] + (vals[c] - vals[f]) * (k - f)
+
+p50 = pct(times, 50) * 1000
+p95 = pct(times, 95) * 1000
+p99 = pct(times, 99) * 1000
+print(f"{p50:.1f} {p95:.1f} {p99:.1f}")
+PY
+}
+
+normalize_json_number() {
+    local value="$1"
+    if [ "$value" = "N/A" ]; then
+        echo "null"
+    else
+        echo "$value"
+    fi
+}
+
 # Initialize
 FAILURES=0
 
@@ -98,9 +151,18 @@ CLI_RESULT=$(hyperfine --warmup 2 --runs 10 --export-json /tmp/bench_cli.json \
 
 CLI_MS=$(jq '.results[0].mean * 1000' /tmp/bench_cli.json 2>/dev/null || echo "N/A")
 CLI_MS=$(printf "%.1f" "$CLI_MS")
+read -r CLI_P50 CLI_P95 CLI_P99 < <(get_percentiles /tmp/bench_cli.json)
+CLI_P95_JSON=$(normalize_json_number "$CLI_P95")
+CLI_P99_JSON=$(normalize_json_number "$CLI_P99")
 
 print_result "CLI cold start" "$CLI_MS" "ms" "$THRESHOLD_CLI_COLD_START_MS"
+if [ "$CLI_P95" != "N/A" ]; then
+    print_result "CLI cold start p95" "$CLI_P95" "ms" "$THRESHOLD_CLI_COLD_START_P95_MS"
+    print_result "CLI cold start p99" "$CLI_P99" "ms" "$THRESHOLD_CLI_COLD_START_P99_MS"
+fi
 JSON_RESULTS+=("\"cli_cold_start_ms\": $CLI_MS")
+JSON_RESULTS+=("\"cli_cold_start_p95_ms\": $CLI_P95_JSON")
+JSON_RESULTS+=("\"cli_cold_start_p99_ms\": $CLI_P99_JSON")
 
 # ============================================================================
 # Benchmark 2: Daemon IPC Round-trip
@@ -119,9 +181,18 @@ IPC_RESULT=$(hyperfine --warmup 3 --runs 10 --export-json /tmp/bench_ipc.json \
 
 IPC_MS=$(jq '.results[0].mean * 1000' /tmp/bench_ipc.json 2>/dev/null || echo "N/A")
 IPC_MS=$(printf "%.1f" "$IPC_MS")
+read -r IPC_P50 IPC_P95 IPC_P99 < <(get_percentiles /tmp/bench_ipc.json)
+IPC_P95_JSON=$(normalize_json_number "$IPC_P95")
+IPC_P99_JSON=$(normalize_json_number "$IPC_P99")
 
 print_result "Daemon IPC" "$IPC_MS" "ms"
+if [ "$IPC_P95" != "N/A" ]; then
+    print_result "Daemon IPC p95" "$IPC_P95" "ms" "$THRESHOLD_IPC_P95_MS"
+    print_result "Daemon IPC p99" "$IPC_P99" "ms" "$THRESHOLD_IPC_P99_MS"
+fi
 JSON_RESULTS+=("\"daemon_ipc_ms\": $IPC_MS")
+JSON_RESULTS+=("\"daemon_ipc_p95_ms\": $IPC_P95_JSON")
+JSON_RESULTS+=("\"daemon_ipc_p99_ms\": $IPC_P99_JSON")
 
 # ============================================================================
 # Benchmark 3: Search Latency
@@ -133,9 +204,18 @@ SEARCH_RESULT=$(hyperfine --warmup 3 --runs 10 --export-json /tmp/bench_search.j
 
 SEARCH_MS=$(jq '.results[0].mean * 1000' /tmp/bench_search.json 2>/dev/null || echo "N/A")
 SEARCH_MS=$(printf "%.1f" "$SEARCH_MS")
+read -r SEARCH_P50 SEARCH_P95 SEARCH_P99 < <(get_percentiles /tmp/bench_search.json)
+SEARCH_P95_JSON=$(normalize_json_number "$SEARCH_P95")
+SEARCH_P99_JSON=$(normalize_json_number "$SEARCH_P99")
 
 print_result "Search latency" "$SEARCH_MS" "ms" "$THRESHOLD_SEARCH_MS"
+if [ "$SEARCH_P95" != "N/A" ]; then
+    print_result "Search latency p95" "$SEARCH_P95" "ms" "$THRESHOLD_SEARCH_P95_MS"
+    print_result "Search latency p99" "$SEARCH_P99" "ms" "$THRESHOLD_SEARCH_P99_MS"
+fi
 JSON_RESULTS+=("\"search_latency_ms\": $SEARCH_MS")
+JSON_RESULTS+=("\"search_latency_p95_ms\": $SEARCH_P95_JSON")
+JSON_RESULTS+=("\"search_latency_p99_ms\": $SEARCH_P99_JSON")
 
 # ============================================================================
 # Benchmark 4: Hook Capture Latency
@@ -148,12 +228,23 @@ if [ -f "$DIACHRON_HOOK" ]; then
 
     HOOK_MS=$(jq '.results[0].mean * 1000' /tmp/bench_hook.json 2>/dev/null || echo "N/A")
     HOOK_MS=$(printf "%.1f" "$HOOK_MS")
+    read -r HOOK_P50 HOOK_P95 HOOK_P99 < <(get_percentiles /tmp/bench_hook.json)
+    HOOK_P95_JSON=$(normalize_json_number "$HOOK_P95")
+    HOOK_P99_JSON=$(normalize_json_number "$HOOK_P99")
 
     print_result "Hook capture" "$HOOK_MS" "ms" "$THRESHOLD_HOOK_MS"
+    if [ "$HOOK_P95" != "N/A" ]; then
+        print_result "Hook capture p95" "$HOOK_P95" "ms" "$THRESHOLD_HOOK_P95_MS"
+        print_result "Hook capture p99" "$HOOK_P99" "ms" "$THRESHOLD_HOOK_P99_MS"
+    fi
     JSON_RESULTS+=("\"hook_capture_ms\": $HOOK_MS")
+    JSON_RESULTS+=("\"hook_capture_p95_ms\": $HOOK_P95_JSON")
+    JSON_RESULTS+=("\"hook_capture_p99_ms\": $HOOK_P99_JSON")
 else
     echo "  Warning: Hook binary not found, skipping"
     JSON_RESULTS+=("\"hook_capture_ms\": null")
+    JSON_RESULTS+=("\"hook_capture_p95_ms\": null")
+    JSON_RESULTS+=("\"hook_capture_p99_ms\": null")
 fi
 
 # ============================================================================

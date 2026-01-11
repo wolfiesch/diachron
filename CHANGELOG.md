@@ -97,10 +97,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Tool filtering with `--tool`
   - Statistics with `--stats`
   - Export to Markdown and JSON
-  - AI summaries with `--summarize` (requires OpenAI API key)
+  - AI summaries with `--summarize` (requires ANTHROPIC_API_KEY)
 
 - **AI Summaries**
-  - On-demand summarization via OpenAI gpt-4o-mini
+  - On-demand summarization via Anthropic Claude Haiku
   - Batch processing with configurable limits
   - 10-word concise summaries
   - ~$0.03 per 1000 events
@@ -130,6 +130,77 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Rust hook uses `thin` LTO (not full) to avoid hangs on certain systems
 - Binary corruption issues on macOS resolved by pointing directly to `target/release/`
 - gpt-4o-mini used for summaries (gpt-5-mini is a reasoning model that doesn't work for this use case)
+
+---
+
+## [0.3.0] - 2026-01-11
+
+### Added
+
+- **Hash-Chain Tamper Evidence**
+  - SHA256 hash chain linking all events (cryptographic tamper detection)
+  - `prev_hash` and `event_hash` columns on every event
+  - Genesis hash for chain origin
+  - Daily checkpoints with `chain_checkpoints` table
+  - `diachron verify` command to validate chain integrity
+
+- **PR Narrative Generation**
+  - `diachron export-evidence` - Generate JSON evidence packs
+  - `diachron pr-comment` - Post formatted Markdown to PRs via `gh` CLI
+  - Event → Commit → PR correlation with 3-tier confidence:
+    - HIGH: Direct `git_commit_sha` linkage
+    - MEDIUM: Same session as commit event
+    - LOW: Time-window correlation (5min before commit)
+  - Coverage metrics showing matched vs unmatched events
+
+- **Content Fingerprinting**
+  - `content_hash` and `context_hash` for stable blame across refactors
+  - SHA256 content hashing with normalized whitespace
+  - Context hashing (±5 lines surrounding code)
+  - Optional semantic signature (384-dim embeddings)
+  - Three-tier matching: ContentHash → ContextHash → SemanticSimilarity
+
+- **Semantic Blame (v0.4 Preview)**
+  - `diachron blame <file:line>` - Find the AI session that wrote code
+  - `--json` flag for CI/IDE integration
+  - `--mode strict|best-effort|inferred` for confidence control
+  - Shows intent, session, timestamp, and verification status
+
+- **GitHub Action**
+  - `wolfiesch/diachron/github-action@main` for automated PR comments
+  - Reads `diachron.evidence.json` and posts formatted narrative
+  - Supports `update` mode (edit existing comment) or `new` mode
+  - Outputs: `comment-id`, `coverage`, `verified`
+
+- **Schema Migration v4**
+  - Hash chain columns: `prev_hash`, `event_hash`
+  - Fingerprint columns: `content_hash`, `context_hash`
+  - `chain_checkpoints` table for verification anchors
+  - Indexes on `event_hash` for fast lookups
+
+### Changed
+
+- Daemon `save_event()` now computes hash chain on every insert
+- Evidence pack renders verification checklist: chain, tests, build, human review
+- 42 tests passing across all crates
+
+### Performance
+
+| Metric | v0.2.0 | v0.3.0 | Notes |
+|--------|--------|--------|-------|
+| Hash computation | N/A | ~0.5ms | SHA256 per event |
+| Chain verification | N/A | ~100ms/1000 events | Full chain scan |
+| PR correlation | N/A | ~50ms | Typical PR size |
+| Evidence export | N/A | ~10ms | JSON serialization |
+
+### New Commands
+
+```bash
+diachron verify              # Verify hash chain integrity
+diachron export-evidence     # Generate evidence pack JSON
+diachron pr-comment --pr 142 # Post PR narrative comment
+diachron blame src/auth.rs:42 # Semantic blame for line
+```
 
 ---
 

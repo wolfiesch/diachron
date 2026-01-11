@@ -38,7 +38,10 @@ from typing import Optional
 # ============================================================================
 
 class Operation(Enum):
-    """File operation types. Rust: enum Operation { Create, Modify, ... }"""
+    """File operation types.
+
+    Rust: enum Operation { Create, Modify, ... }.
+    """
     CREATE = "create"
     MODIFY = "modify"
     DELETE = "delete"
@@ -51,16 +54,17 @@ class Operation(Enum):
 
 @dataclass
 class CaptureEvent:
-    """
-    Event to capture. Rust equivalent:
+    """Event to capture from a tool invocation.
 
-    struct CaptureEvent {
-        tool_name: String,
-        file_path: Option<String>,
-        operation: Operation,
-        diff_summary: Option<String>,
-        raw_input: Option<String>,
-    }
+    Rust equivalent:
+        struct CaptureEvent { ... }
+
+    Attributes:
+        tool_name: Tool name (Write, Edit, Bash).
+        file_path: Optional file path affected by the tool.
+        operation: Operation type derived from the tool input.
+        diff_summary: Short summary of the change or command detail.
+        raw_input: Raw input snippet for debugging or context.
     """
     tool_name: str
     file_path: Optional[str] = None
@@ -69,7 +73,11 @@ class CaptureEvent:
     raw_input: Optional[str] = None
 
     def to_db_args(self) -> dict:
-        """Convert to database insert arguments."""
+        """Convert the event to database insert arguments.
+
+        Returns:
+            Dictionary suitable for `DiachronDB.insert_event`.
+        """
         return {
             "tool_name": self.tool_name,
             "file_path": self.file_path,
@@ -81,17 +89,18 @@ class CaptureEvent:
 
 @dataclass
 class HookInput:
-    """
-    Input from Claude Code PostToolUse hook. Rust equivalent:
+    """Input from the Claude Code PostToolUse hook.
 
-    struct HookInput {
-        session_id: String,
-        tool_name: String,
-        tool_input: serde_json::Value,
-        tool_result: Option<String>,
-        timestamp: String,
-        cwd: Option<String>,
-    }
+    Rust equivalent:
+        struct HookInput { ... }
+
+    Attributes:
+        tool_name: Tool name from the hook payload.
+        tool_input: Tool input payload (JSON decoded).
+        tool_result: Tool output or result string, if present.
+        session_id: Optional session identifier from the hook.
+        timestamp: Optional hook timestamp string.
+        cwd: Optional working directory reported by the hook.
     """
     tool_name: str
     tool_input: dict
@@ -102,6 +111,14 @@ class HookInput:
 
     @classmethod
     def from_json(cls, data: dict) -> HookInput:
+        """Build a HookInput from a decoded JSON payload.
+
+        Args:
+            data: Hook payload as a Python dictionary.
+
+        Returns:
+            Parsed HookInput instance.
+        """
         return cls(
             tool_name=data.get("tool_name", data.get("tool", "")),  # Support both formats
             tool_input=data.get("tool_input", {}),
@@ -144,13 +161,13 @@ SKIP_COMMANDS = frozenset([
 
 
 def classify_bash_command(command: str) -> tuple[Operation, Optional[str]]:
-    """
-    Classify a bash command to determine if it's file-modifying.
+    """Classify a bash command to determine if it's file-modifying.
 
-    Returns (Operation, optional_detail)
+    Args:
+        command: Raw bash command string.
 
-    Rust equivalent:
-        fn classify_bash_command(cmd: &str) -> (Operation, Option<String>)
+    Returns:
+        Tuple of `(operation, detail)` where detail may include a path or message.
     """
     cmd = command.strip()
     cmd_lower = cmd.lower()
@@ -172,7 +189,15 @@ def classify_bash_command(command: str) -> tuple[Operation, Optional[str]]:
 
 
 def extract_command_detail(cmd: str, pattern: str) -> Optional[str]:
-    """Extract meaningful detail from a command."""
+    """Extract meaningful detail from a command.
+
+    Args:
+        cmd: Raw command string.
+        pattern: Matched command pattern (e.g., "git commit").
+
+    Returns:
+        A short detail string or None if no detail is detected.
+    """
     if pattern == "git commit":
         # Extract commit message
         if "-m" in cmd:
@@ -204,7 +229,14 @@ def extract_command_detail(cmd: str, pattern: str) -> Optional[str]:
 # ============================================================================
 
 def parse_write_event(hook: HookInput) -> CaptureEvent:
-    """Parse a Write tool event."""
+    """Parse a Write tool event.
+
+    Args:
+        hook: Parsed hook input.
+
+    Returns:
+        CaptureEvent describing the write.
+    """
     file_path = hook.tool_input.get("file_path", "")
     content = hook.tool_input.get("content", "")
 
@@ -227,7 +259,14 @@ def parse_write_event(hook: HookInput) -> CaptureEvent:
 
 
 def parse_edit_event(hook: HookInput) -> CaptureEvent:
-    """Parse an Edit tool event."""
+    """Parse an Edit tool event.
+
+    Args:
+        hook: Parsed hook input.
+
+    Returns:
+        CaptureEvent describing the edit.
+    """
     file_path = hook.tool_input.get("file_path", "")
     old_string = hook.tool_input.get("old_string", "")
     new_string = hook.tool_input.get("new_string", "")
@@ -254,9 +293,13 @@ def parse_edit_event(hook: HookInput) -> CaptureEvent:
 
 
 def parse_bash_event(hook: HookInput) -> Optional[CaptureEvent]:
-    """
-    Parse a Bash tool event.
-    Returns None if the command should be skipped.
+    """Parse a Bash tool event.
+
+    Args:
+        hook: Parsed hook input.
+
+    Returns:
+        CaptureEvent if the command should be captured, otherwise None.
     """
     command = hook.tool_input.get("command", "")
 
@@ -276,12 +319,13 @@ def parse_bash_event(hook: HookInput) -> Optional[CaptureEvent]:
 
 
 def parse_hook_input(hook: HookInput) -> Optional[CaptureEvent]:
-    """
-    Parse hook input into a capture event.
-    Returns None if the event should not be captured.
+    """Parse hook input into a capture event.
 
-    Rust equivalent:
-        fn parse_hook_input(hook: HookInput) -> Option<CaptureEvent>
+    Args:
+        hook: Parsed hook input.
+
+    Returns:
+        CaptureEvent if the event should be captured, otherwise None.
     """
     tool = hook.tool_name
 
@@ -302,9 +346,14 @@ def parse_hook_input(hook: HookInput) -> Optional[CaptureEvent]:
 # ============================================================================
 
 def save_event(event: CaptureEvent, project_root: Optional[Path] = None) -> int:
-    """
-    Save event to database.
-    Returns event ID or -1 on failure.
+    """Save an event to the database.
+
+    Args:
+        event: CaptureEvent to persist.
+        project_root: Optional project root override for database location.
+
+    Returns:
+        Inserted event ID, or -1 on failure.
     """
     try:
         # Import db module (lazy load for speed when skipping events)
@@ -321,9 +370,13 @@ def save_event(event: CaptureEvent, project_root: Optional[Path] = None) -> int:
 
 
 def find_project_root(start_path: Optional[Path] = None) -> Optional[Path]:
-    """
-    Find project root by walking up from start_path.
-    Returns None if no .diachron directory found.
+    """Find the Diachron project root by walking up the filesystem.
+
+    Args:
+        start_path: Optional starting path (defaults to cwd).
+
+    Returns:
+        Path to the project root if found, otherwise None.
     """
     current = start_path or Path.cwd()
     while current != current.parent:
@@ -339,7 +392,14 @@ def find_project_root(start_path: Optional[Path] = None) -> Optional[Path]:
 
 
 def is_diachron_enabled(project_root: Optional[Path] = None) -> bool:
-    """Check if Diachron is enabled for the current project."""
+    """Check whether Diachron is enabled for the current project.
+
+    Args:
+        project_root: Optional project root to check.
+
+    Returns:
+        True if `.diachron` exists for the project, otherwise False.
+    """
     if project_root:
         return (project_root / ".diachron").exists()
     return find_project_root() is not None
@@ -350,12 +410,13 @@ def is_diachron_enabled(project_root: Optional[Path] = None) -> bool:
 # ============================================================================
 
 def main():
-    """
-    Main entry point for hook capture.
+    """Run the hook capture entry point.
 
-    Accepts input in two ways:
-    1. JSON on stdin (from Claude Code hook)
-    2. CLI arguments (for manual testing)
+    Accepts input via JSON on stdin (from the hook) or CLI arguments for
+    manual testing.
+
+    Raises:
+        SystemExit: Exits with status codes for success or failure.
     """
     # Parse input
     if len(sys.argv) > 1 and sys.argv[1] == "--help":
@@ -404,7 +465,11 @@ def main():
 
 
 def parse_cli_args() -> Optional[CaptureEvent]:
-    """Parse CLI arguments for manual capture."""
+    """Parse CLI arguments for manual capture.
+
+    Returns:
+        CaptureEvent derived from CLI flags, or None if parsing fails.
+    """
     import argparse
 
     parser = argparse.ArgumentParser(description="Capture a Diachron event")

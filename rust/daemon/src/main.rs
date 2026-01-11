@@ -19,6 +19,7 @@ use anyhow::Result;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tracing::{info, warn};
 
+mod cache;
 mod background;
 mod db;
 mod handlers;
@@ -27,6 +28,7 @@ mod server;
 mod summarization;
 
 pub use db::Database;
+use cache::SearchCache;
 use diachron_core::{IpcMessage, IpcResponse, VectorIndex, EMBEDDING_DIM};
 use diachron_embeddings::EmbeddingEngine;
 use summarization::Summarizer;
@@ -59,6 +61,9 @@ pub struct DaemonState {
 
     /// Summarizer for conversation exchanges (optional)
     pub summarizer: Option<Summarizer>,
+
+    /// Cache for search results
+    pub search_cache: RwLock<SearchCache>,
 }
 
 impl DaemonState {
@@ -148,6 +153,7 @@ impl DaemonState {
             events_index: RwLock::new(events_index),
             exchanges_index: RwLock::new(exchanges_index),
             summarizer: if summarizer.is_available() { Some(summarizer) } else { None },
+            search_cache: RwLock::new(SearchCache::new(256)),
         })
     }
 
@@ -228,17 +234,59 @@ impl DaemonState {
     }
 }
 
+#[cfg(test)]
+impl DaemonState {
+    pub fn new_for_tests(db_path: PathBuf) -> anyhow::Result<Self> {
+        let diachron_home = db_path
+            .parent()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("/tmp/.diachron-test"));
+        std::fs::create_dir_all(&diachron_home)?;
+
+        let db = Database::open(db_path)?;
+        let events_index = VectorIndex::new(EMBEDDING_DIM)?;
+        let exchanges_index = VectorIndex::new(EMBEDDING_DIM)?;
+
+        Ok(Self {
+            start_time: Instant::now(),
+            events_count: AtomicU64::new(0),
+            shutdown: AtomicBool::new(false),
+            diachron_home,
+            db,
+            embedding_engine: RwLock::new(None),
+            events_index: RwLock::new(events_index),
+            exchanges_index: RwLock::new(exchanges_index),
+            summarizer: None,
+            search_cache: RwLock::new(SearchCache::new(16)),
+        })
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Initialize logging
+    // Set up log directory with daily rotation
+    let log_dir = dirs::home_dir()
+        .map(|h| h.join(".diachron").join("logs"))
+        .unwrap_or_else(|| PathBuf::from("/tmp/.diachron/logs"));
+    std::fs::create_dir_all(&log_dir)?;
+
+    // Create rolling file appender (daily rotation, keeps last 7 days)
+    let file_appender = tracing_appender::rolling::daily(&log_dir, "diachrond.log");
+
+    // Initialize logging with both console and file output
+    // - Console: for interactive debugging
+    // - File: for persistent logs with rotation
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::from_default_env()
                 .add_directive("diachrond=info".parse()?),
         )
+        .with_writer(file_appender)
+        .with_ansi(false) // No color codes in log files
         .init();
 
     info!("Starting diachrond v{}", env!("CARGO_PKG_VERSION"));
+    info!("Logs: {}", log_dir.display());
 
     let state = Arc::new(DaemonState::new()?);
 

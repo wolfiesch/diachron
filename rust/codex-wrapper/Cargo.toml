@@ -1,0 +1,33 @@
+[package]
+name = "diachron-codex"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Standalone wrapper for OpenAI Codex CLI with Diachron provenance tracking"
+
+[[bin]]
+name = "diachron-codex"
+path = "src/main.rs"
+
+[dependencies]
+# Workspace dependencies
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+clap.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+dirs.workspace = true
+
+# Local core library
+diachron-core = { path = "../core" }
+
+# For JSONL parsing
+regex = "1"
+
+# For directory walking
+walkdir = "2"

@@ -19,7 +19,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
-use diachron_core::{IpcMessage, IpcResponse};
+use diachron_core::{verify_chain, IpcMessage, IpcResponse};
 
 #[derive(Parser)]
 #[command(name = "diachron")]
@@ -49,6 +49,10 @@ enum Commands {
         /// Output format: text, json, csv, markdown
         #[arg(long, default_value = "text")]
         format: String,
+
+        /// Watch for new events in real-time (Ctrl+C to stop)
+        #[arg(long)]
+        watch: bool,
     },
 
     /// Capture an event (called by hook)
@@ -107,6 +111,60 @@ enum Commands {
     Config {
         #[command(subcommand)]
         command: ConfigCommands,
+    },
+
+    /// Verify hash-chain integrity
+    Verify,
+
+    /// Export evidence pack for a PR
+    ExportEvidence {
+        /// Output file path (default: diachron.evidence.json)
+        #[arg(long, default_value = "diachron.evidence.json")]
+        output: String,
+
+        /// PR number (if not specified, uses current branch's PR)
+        #[arg(long)]
+        pr: Option<u64>,
+
+        /// Branch name (defaults to current branch)
+        #[arg(long)]
+        branch: Option<String>,
+
+        /// Time window start (e.g., "7d", "2024-01-01")
+        #[arg(long, default_value = "7d")]
+        since: String,
+    },
+
+    /// Post PR narrative comment via gh CLI
+    PrComment {
+        /// PR number
+        #[arg(long)]
+        pr: u64,
+
+        /// Evidence file path (default: diachron.evidence.json)
+        #[arg(long, default_value = "diachron.evidence.json")]
+        evidence: String,
+    },
+
+    /// Semantic blame for a file:line
+    Blame {
+        /// File and line (e.g., src/auth.rs:42)
+        target: String,
+
+        /// Output format: text, json
+        #[arg(long, default_value = "text")]
+        format: String,
+
+        /// Blame mode: strict (HIGH only), best-effort, inferred
+        #[arg(long, default_value = "strict")]
+        mode: String,
+    },
+
+    /// Run database maintenance (VACUUM, ANALYZE, prune old data)
+    Maintenance {
+        /// Prune events/exchanges older than N days (0 = no pruning)
+        #[arg(long, default_value = "0")]
+        retention_days: u32,
     },
 }
 
@@ -207,85 +265,198 @@ fn main() -> Result<()> {
             file,
             limit,
             format,
+            watch,
         } => {
-            let msg = IpcMessage::Timeline {
-                since,
-                file_filter: file,
-                limit,
-            };
+            if watch {
+                // Watch mode: poll for new events
+                println!("📊 Watching for events... (Ctrl+C to stop)\n");
 
-            match send_message(&msg) {
-                Ok(IpcResponse::Events(events)) => {
-                    if events.is_empty() {
-                        if format == "text" {
-                            println!("No events found");
-                        } else if format == "json" {
-                            println!("[]");
+                let mut last_seen_id: i64 = 0;
+
+                // Get initial events to find the starting point
+                let msg = IpcMessage::Timeline {
+                    since: since.clone(),
+                    file_filter: file.clone(),
+                    limit: 1,
+                };
+                if let Ok(IpcResponse::Events(events)) = send_message(&msg) {
+                    if let Some(event) = events.first() {
+                        last_seen_id = event.id;
+                    }
+                }
+
+                loop {
+                    // Small sleep to avoid hammering the daemon
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+
+                    // Query for recent events
+                    let msg = IpcMessage::Timeline {
+                        since: Some("5m".to_string()), // Look back 5 minutes
+                        file_filter: file.clone(),
+                        limit: 50,
+                    };
+
+                    match send_message(&msg) {
+                        Ok(IpcResponse::Events(events)) => {
+                            // Filter to only new events (id > last_seen_id)
+                            let new_events: Vec<_> = events
+                                .iter()
+                                .filter(|e| e.id > last_seen_id)
+                                .collect();
+
+                            for event in &new_events {
+                                // Update last seen ID
+                                if event.id > last_seen_id {
+                                    last_seen_id = event.id;
+                                }
+
+                                // Print based on format
+                                match format.as_str() {
+                                    "json" => {
+                                        println!("{}", serde_json::to_string(event).unwrap());
+                                    }
+                                    _ => {
+                                        // Colored output for watch mode
+                                        let op_icon = match event.operation.as_deref() {
+                                            Some("create") => "✨",
+                                            Some("modify") => "📝",
+                                            Some("delete") => "🗑️",
+                                            Some("commit") => "📦",
+                                            Some("execute") => "⚡",
+                                            _ => "•",
+                                        };
+
+                                        let file_display = event
+                                            .file_path
+                                            .as_ref()
+                                            .map(|p| {
+                                                // Show just filename + parent for brevity
+                                                std::path::Path::new(p)
+                                                    .file_name()
+                                                    .map(|f| f.to_string_lossy().to_string())
+                                                    .unwrap_or_else(|| p.clone())
+                                            })
+                                            .unwrap_or_else(|| "-".to_string());
+
+                                        let session_short = event
+                                            .session_id
+                                            .as_ref()
+                                            .map(|s| &s[..6.min(s.len())])
+                                            .unwrap_or("-");
+
+                                        println!(
+                                            "[{}] {} {} {} - Session {}",
+                                            event
+                                                .timestamp_display
+                                                .as_deref()
+                                                .unwrap_or(&event.timestamp[11..19]),
+                                            op_icon,
+                                            event.tool_name,
+                                            file_display,
+                                            session_short
+                                        );
+
+                                        // Show diff summary if available
+                                        if let Some(ref diff) = event.diff_summary {
+                                            if !diff.is_empty() {
+                                                println!("    └─ {}", diff);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         }
-                        // CSV/markdown: just output headers with no data
-                    } else {
-                        match format.as_str() {
-                            "json" => {
-                                println!("{}", serde_json::to_string_pretty(&events).unwrap());
+                        Ok(IpcResponse::Error(e)) => {
+                            eprintln!("Watch error: {}", e);
+                        }
+                        Err(e) => {
+                            eprintln!("Connection lost: {}. Retrying...", e);
+                            std::thread::sleep(std::time::Duration::from_secs(2));
+                        }
+                        _ => {}
+                    }
+                }
+            } else {
+                // Normal (non-watch) mode
+                let msg = IpcMessage::Timeline {
+                    since,
+                    file_filter: file,
+                    limit,
+                };
+
+                match send_message(&msg) {
+                    Ok(IpcResponse::Events(events)) => {
+                        if events.is_empty() {
+                            if format == "text" {
+                                println!("No events found");
+                            } else if format == "json" {
+                                println!("[]");
                             }
-                            "csv" => {
-                                println!("timestamp,tool_name,file_path,operation,session_id");
-                                for event in events {
-                                    println!(
-                                        "\"{}\",\"{}\",\"{}\",\"{}\",\"{}\"",
-                                        event.timestamp,
-                                        event.tool_name,
-                                        event.file_path.as_deref().unwrap_or(""),
-                                        event.operation.as_deref().unwrap_or(""),
-                                        event.session_id.as_deref().unwrap_or("")
-                                    );
+                            // CSV/markdown: just output headers with no data
+                        } else {
+                            match format.as_str() {
+                                "json" => {
+                                    println!("{}", serde_json::to_string_pretty(&events).unwrap());
                                 }
-                            }
-                            "markdown" | "md" => {
-                                println!("| Timestamp | Tool | File | Operation |");
-                                println!("|-----------|------|------|-----------|");
-                                for event in events {
-                                    println!(
-                                        "| {} | {} | {} | {} |",
-                                        event
-                                            .timestamp_display
-                                            .as_deref()
-                                            .unwrap_or(&event.timestamp),
-                                        event.tool_name,
-                                        event.file_path.as_deref().unwrap_or("-"),
-                                        event.operation.as_deref().unwrap_or("-")
-                                    );
+                                "csv" => {
+                                    println!("timestamp,tool_name,file_path,operation,session_id");
+                                    for event in events {
+                                        println!(
+                                            "\"{}\",\"{}\",\"{}\",\"{}\",\"{}\"",
+                                            event.timestamp,
+                                            event.tool_name,
+                                            event.file_path.as_deref().unwrap_or(""),
+                                            event.operation.as_deref().unwrap_or(""),
+                                            event.session_id.as_deref().unwrap_or("")
+                                        );
+                                    }
                                 }
-                            }
-                            _ => {
-                                // Default: text format
-                                for event in events {
-                                    println!(
-                                        "{} {} {}",
-                                        event
-                                            .timestamp_display
-                                            .as_deref()
-                                            .unwrap_or(&event.timestamp),
-                                        event.tool_name,
-                                        event.file_path.as_deref().unwrap_or("-")
-                                    );
+                                "markdown" | "md" => {
+                                    println!("| Timestamp | Tool | File | Operation |");
+                                    println!("|-----------|------|------|-----------|");
+                                    for event in events {
+                                        println!(
+                                            "| {} | {} | {} | {} |",
+                                            event
+                                                .timestamp_display
+                                                .as_deref()
+                                                .unwrap_or(&event.timestamp),
+                                            event.tool_name,
+                                            event.file_path.as_deref().unwrap_or("-"),
+                                            event.operation.as_deref().unwrap_or("-")
+                                        );
+                                    }
+                                }
+                                _ => {
+                                    // Default: text format
+                                    for event in events {
+                                        println!(
+                                            "{} {} {}",
+                                            event
+                                                .timestamp_display
+                                                .as_deref()
+                                                .unwrap_or(&event.timestamp),
+                                            event.tool_name,
+                                            event.file_path.as_deref().unwrap_or("-")
+                                        );
+                                    }
                                 }
                             }
                         }
                     }
-                }
-                Ok(IpcResponse::Error(e)) => {
-                    eprintln!("Error: {}", e);
-                    std::process::exit(1);
-                }
-                Ok(_) => {
-                    eprintln!("Unexpected response");
-                    std::process::exit(1);
-                }
-                Err(e) => {
-                    eprintln!("Failed to communicate with daemon: {}", e);
-                    eprintln!("Is the daemon running? Try: diachron daemon start");
-                    std::process::exit(1);
+                    Ok(IpcResponse::Error(e)) => {
+                        eprintln!("Error: {}", e);
+                        std::process::exit(1);
+                    }
+                    Ok(_) => {
+                        eprintln!("Unexpected response");
+                        std::process::exit(1);
+                    }
+                    Err(e) => {
+                        eprintln!("Failed to communicate with daemon: {}", e);
+                        eprintln!("Is the daemon running? Try: diachron daemon start");
+                        std::process::exit(1);
+                    }
                 }
             }
         }
@@ -933,6 +1104,511 @@ enabled = true
                 }
             }
         }
+
+        Commands::Verify => {
+            println!("Diachron Hash-Chain Verification");
+            println!("=================================\n");
+
+            // Open database directly for read-only verification
+            let db_path = dirs::home_dir()
+                .map(|h| h.join(".diachron/diachron.db"))
+                .context("Could not determine home directory")?;
+
+            if !db_path.exists() {
+                eprintln!("Database not found: {:?}", db_path);
+                eprintln!("Hint: Run 'diachron daemon start' to initialize");
+                std::process::exit(1);
+            }
+
+            let conn = rusqlite::Connection::open_with_flags(
+                &db_path,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            )
+            .context("Failed to open database")?;
+
+            match verify_chain(&conn) {
+                Ok(result) => {
+                    if result.valid {
+                        println!("✅ Chain integrity verified");
+                    } else {
+                        println!("❌ Chain integrity FAILED");
+                    }
+
+                    println!("   Events checked: {}", result.events_checked);
+                    println!("   Checkpoints: {}", result.checkpoints_checked);
+
+                    if let Some(ref first) = result.first_event {
+                        println!("   First event: {}", first);
+                    }
+                    if let Some(ref last) = result.last_event {
+                        println!("   Last event: {}", last);
+                    }
+                    if let Some(ref root) = result.chain_root {
+                        println!("   Chain root: {}...", &root[..8.min(root.len())]);
+                    }
+
+                    if let Some(ref bp) = result.break_point {
+                        println!("\n⚠️ Break detected at event #{}", bp.event_id);
+                        println!("   Timestamp: {}", bp.timestamp);
+                        println!("   Expected hash: {}...", &bp.expected_hash[..16]);
+                        println!("   Actual hash: {}...", &bp.actual_hash[..16]);
+                        println!("\n   Recommendation: Restore from backup or contact support");
+                    }
+
+                    if !result.valid {
+                        std::process::exit(1);
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Verification failed: {}", e);
+                    std::process::exit(1);
+                }
+            }
+        }
+
+        Commands::Maintenance { retention_days } => {
+            println!("🔧 Running database maintenance...\n");
+
+            let msg = IpcMessage::Maintenance { retention_days };
+            match send_message(&msg) {
+                Ok(IpcResponse::MaintenanceStats {
+                    size_before,
+                    size_after,
+                    events_pruned,
+                    exchanges_pruned,
+                    duration_ms,
+                }) => {
+                    let reduction_pct = if size_before > 0 {
+                        (1.0 - size_after as f64 / size_before as f64) * 100.0
+                    } else {
+                        0.0
+                    };
+
+                    println!(
+                        "  ├─ VACUUM: {:.1} MB → {:.1} MB ({:.1}% reduction)",
+                        size_before as f64 / 1024.0 / 1024.0,
+                        size_after as f64 / 1024.0 / 1024.0,
+                        reduction_pct
+                    );
+                    println!("  ├─ ANALYZE: Updated query planner stats");
+
+                    if retention_days > 0 {
+                        println!(
+                            "  ├─ Old events: {} pruned (retention: {} days)",
+                            events_pruned, retention_days
+                        );
+                        println!(
+                            "  └─ Old exchanges: {} pruned (retention: {} days)",
+                            exchanges_pruned, retention_days
+                        );
+                    } else {
+                        println!("  └─ Pruning: disabled (use --retention-days to enable)");
+                    }
+
+                    println!("\n✅ Maintenance complete (took {:.1}s)", duration_ms as f64 / 1000.0);
+                }
+                Ok(IpcResponse::Error(e)) => {
+                    eprintln!("❌ Maintenance failed: {}", e);
+                    std::process::exit(1);
+                }
+                Ok(_) => {
+                    eprintln!("❌ Unexpected response from daemon");
+                    std::process::exit(1);
+                }
+                Err(e) => {
+                    eprintln!("❌ Failed to connect to daemon: {}", e);
+                    eprintln!("   Hint: Start the daemon with 'diachron daemon start'");
+                    std::process::exit(1);
+                }
+            }
+        }
+
+        Commands::ExportEvidence {
+            output,
+            pr,
+            branch,
+            since,
+        } => {
+            println!("Exporting evidence pack...\n");
+
+            // Get current branch if not specified
+            let branch_name = branch.unwrap_or_else(|| {
+                std::process::Command::new("git")
+                    .args(["branch", "--show-current"])
+                    .output()
+                    .ok()
+                    .and_then(|o| String::from_utf8(o.stdout).ok())
+                    .map(|s| s.trim().to_string())
+                    .unwrap_or_else(|| "unknown".to_string())
+            });
+
+            // Get PR number from branch if not specified
+            let pr_id = pr.unwrap_or_else(|| {
+                // Try to get PR number from gh CLI
+                std::process::Command::new("gh")
+                    .args(["pr", "view", "--json", "number", "-q", ".number"])
+                    .output()
+                    .ok()
+                    .and_then(|o| String::from_utf8(o.stdout).ok())
+                    .and_then(|s| s.trim().parse().ok())
+                    .unwrap_or(0)
+            });
+
+            if pr_id == 0 {
+                eprintln!("Could not determine PR number. Use --pr flag.");
+                std::process::exit(1);
+            }
+
+            println!("PR: #{}", pr_id);
+            println!("Branch: {}", branch_name);
+            println!("Since: {}", since);
+
+            // Get commits from git log (origin/main..HEAD)
+            let commits: Vec<String> = std::process::Command::new("git")
+                .args(["log", "--format=%H", "origin/main..HEAD"])
+                .output()
+                .ok()
+                .and_then(|o| String::from_utf8(o.stdout).ok())
+                .map(|s| s.lines().map(|l| l.to_string()).collect())
+                .unwrap_or_default();
+
+            if commits.is_empty() {
+                // Fallback: try to get commits from the last week
+                let fallback_commits: Vec<String> = std::process::Command::new("git")
+                    .args(["log", "--format=%H", "--since=7 days ago", &branch_name])
+                    .output()
+                    .ok()
+                    .and_then(|o| String::from_utf8(o.stdout).ok())
+                    .map(|s| s.lines().map(|l| l.to_string()).collect())
+                    .unwrap_or_default();
+
+                if fallback_commits.is_empty() {
+                    eprintln!("No commits found for branch {}.", branch_name);
+                    eprintln!("Make sure you have commits ahead of origin/main or use --since flag.");
+                    std::process::exit(1);
+                }
+                println!("Found {} commits (fallback: last 7 days)", fallback_commits.len());
+            } else {
+                println!("Found {} commits ahead of origin/main", commits.len());
+            }
+
+            // Parse since time
+            let (start_time, end_time) = parse_time_range(&since);
+
+            println!("Time range: {} to {}", start_time, end_time);
+
+            // Send correlation request to daemon
+            let msg = IpcMessage::CorrelateEvidence {
+                pr_id,
+                commits: commits.clone(),
+                branch: branch_name.clone(),
+                start_time,
+                end_time,
+                intent: None, // TODO: Extract from recent conversation
+            };
+
+            match send_message(&msg) {
+                Ok(IpcResponse::EvidenceResult(result)) => {
+                    // Write evidence pack to file
+                    let json = serde_json::to_string_pretty(&result)
+                        .context("Failed to serialize evidence pack")?;
+
+                    std::fs::write(&output, &json)
+                        .context("Failed to write evidence pack")?;
+
+                    println!("\n✅ Evidence pack written to: {}", output);
+                    println!("\nSummary:");
+                    println!("  Files changed: {}", result.summary.files_changed);
+                    println!("  Lines: +{} / -{}", result.summary.lines_added, result.summary.lines_removed);
+                    println!("  Tool operations: {}", result.summary.tool_operations);
+                    println!("  Sessions: {}", result.summary.sessions);
+                    println!("  Coverage: {:.1}%", result.coverage_pct);
+
+                    if result.verification.chain_verified {
+                        println!("  ✓ Hash chain verified");
+                    }
+                    if result.verification.tests_executed {
+                        println!("  ✓ Tests executed");
+                    }
+                    if result.verification.build_succeeded {
+                        println!("  ✓ Build succeeded");
+                    }
+                }
+                Ok(IpcResponse::Error(e)) => {
+                    eprintln!("Failed to generate evidence: {}", e);
+                    std::process::exit(1);
+                }
+                Ok(_) => {
+                    eprintln!("Unexpected response from daemon");
+                    std::process::exit(1);
+                }
+                Err(e) => {
+                    eprintln!("Failed to communicate with daemon: {}", e);
+                    eprintln!("Is the daemon running? Try: diachron daemon start");
+                    std::process::exit(1);
+                }
+            }
+        }
+
+        Commands::PrComment { pr, evidence } => {
+            println!("Posting PR narrative comment...\n");
+
+            // Read evidence pack
+            let evidence_content = std::fs::read_to_string(&evidence)
+                .context("Failed to read evidence file")?;
+
+            let pack: serde_json::Value = serde_json::from_str(&evidence_content)
+                .context("Failed to parse evidence JSON")?;
+
+            // Build markdown narrative
+            let mut md = String::new();
+
+            // Header
+            md.push_str(&format!(
+                "## PR #{}: AI Provenance Evidence\n\n",
+                pack["pr_id"].as_u64().unwrap_or(pr)
+            ));
+
+            // Intent section (if available)
+            if let Some(intent) = pack["intent"].as_str() {
+                if !intent.is_empty() {
+                    md.push_str("### Intent\n");
+                    md.push_str(&format!("> {}\n\n", intent));
+                }
+            }
+
+            // Summary section
+            md.push_str("### What Changed\n");
+            md.push_str(&format!(
+                "- **Files modified**: {}\n",
+                pack["summary"]["files_changed"].as_u64().unwrap_or(0)
+            ));
+            md.push_str(&format!(
+                "- **Lines**: +{} / -{}\n",
+                pack["summary"]["lines_added"].as_u64().unwrap_or(0),
+                pack["summary"]["lines_removed"].as_u64().unwrap_or(0)
+            ));
+            md.push_str(&format!(
+                "- **Tool operations**: {}\n",
+                pack["summary"]["tool_operations"].as_u64().unwrap_or(0)
+            ));
+            md.push_str(&format!(
+                "- **Sessions**: {}\n\n",
+                pack["summary"]["sessions"].as_u64().unwrap_or(0)
+            ));
+
+            // Evidence trail section
+            md.push_str("### Evidence Trail\n");
+            let coverage = pack["coverage_pct"].as_f64().unwrap_or(0.0);
+            let unmatched = pack["unmatched_count"].as_u64().unwrap_or(0);
+            md.push_str(&format!("- **Coverage**: {:.1}% of events matched to commits", coverage));
+            if unmatched > 0 {
+                md.push_str(&format!(" ({} unmatched)", unmatched));
+            }
+            md.push_str("\n");
+
+            // List commits with their events
+            if let Some(commits) = pack["commits"].as_array() {
+                for commit in commits {
+                    let sha = commit["sha"].as_str().unwrap_or("");
+                    let sha_short = &sha[..7.min(sha.len())];
+                    let confidence = commit["confidence"].as_str().unwrap_or("LOW");
+
+                    md.push_str(&format!("\n**Commit `{}`**", sha_short));
+                    if let Some(msg) = commit["message"].as_str() {
+                        let first_line = msg.lines().next().unwrap_or(msg);
+                        md.push_str(&format!(": {}", first_line));
+                    }
+                    md.push_str(&format!(" ({})\n", confidence));
+
+                    if let Some(events) = commit["events"].as_array() {
+                        for event in events.iter().take(5) {
+                            let tool = event["tool_name"].as_str().unwrap_or("-");
+                            let file = event["file_path"].as_str().unwrap_or("-");
+                            let op = event["operation"].as_str().unwrap_or("-");
+                            md.push_str(&format!("  - `{}` {} → {}\n", tool, op, file));
+                        }
+                        if events.len() > 5 {
+                            md.push_str(&format!("  - *...and {} more*\n", events.len() - 5));
+                        }
+                    }
+                }
+            }
+            md.push_str("\n");
+
+            // Verification section
+            md.push_str("### Verification\n");
+            md.push_str(&format!(
+                "- [{}] Hash chain integrity\n",
+                if pack["verification"]["chain_verified"].as_bool().unwrap_or(false) { "x" } else { " " }
+            ));
+            md.push_str(&format!(
+                "- [{}] Tests executed after changes\n",
+                if pack["verification"]["tests_executed"].as_bool().unwrap_or(false) { "x" } else { " " }
+            ));
+            md.push_str(&format!(
+                "- [{}] Build succeeded\n",
+                if pack["verification"]["build_succeeded"].as_bool().unwrap_or(false) { "x" } else { " " }
+            ));
+            md.push_str(&format!(
+                "- [{}] Human review\n\n",
+                if pack["verification"]["human_reviewed"].as_bool().unwrap_or(false) { "x" } else { " " }
+            ));
+
+            // Footer
+            md.push_str(&format!(
+                "---\n*Generated by [Diachron](https://github.com/wolfiesch/diachron) v{} at {}*\n",
+                pack["diachron_version"].as_str().unwrap_or(env!("CARGO_PKG_VERSION")),
+                pack["generated_at"].as_str().unwrap_or("unknown")
+            ));
+
+            // Post via gh CLI
+            let status = std::process::Command::new("gh")
+                .args(["pr", "comment", &pr.to_string(), "-b", &md])
+                .status()
+                .context("Failed to run gh CLI")?;
+
+            if status.success() {
+                println!("✅ PR comment posted successfully");
+                println!("\nPosted content:\n{}", md);
+            } else {
+                eprintln!("Failed to post PR comment (gh exit code: {:?})", status.code());
+                std::process::exit(1);
+            }
+        }
+
+        Commands::Blame { target, format, mode } => {
+            // Parse file:line
+            let parts: Vec<&str> = target.rsplitn(2, ':').collect();
+            if parts.len() != 2 {
+                eprintln!("Invalid target format. Use: file:line (e.g., src/auth.rs:42)");
+                std::process::exit(1);
+            }
+
+            let line: u32 = parts[0].parse().context("Invalid line number")?;
+            let file = parts[1];
+
+            // Read file content to get the line and context
+            let file_path = std::path::Path::new(file);
+            let (content, context) = if file_path.exists() {
+                let file_content = std::fs::read_to_string(file_path)
+                    .unwrap_or_default();
+                let lines: Vec<&str> = file_content.lines().collect();
+
+                // Get the target line (1-indexed)
+                let line_idx = (line as usize).saturating_sub(1);
+                let target_line = lines.get(line_idx).unwrap_or(&"").to_string();
+
+                // Get context (±5 lines)
+                let start = line_idx.saturating_sub(5);
+                let end = (line_idx + 6).min(lines.len());
+                let context_lines: String = lines[start..end].join("\n");
+
+                (target_line, context_lines)
+            } else {
+                // File doesn't exist locally, use empty placeholders
+                (String::new(), String::new())
+            };
+
+            // Use fingerprint-based blame via daemon
+            let msg = IpcMessage::BlameByFingerprint {
+                file_path: file.to_string(),
+                line_number: line,
+                content,
+                context,
+                mode: mode.clone(),
+            };
+
+            match send_message(&msg) {
+                Ok(IpcResponse::BlameResult(blame_match)) => {
+                    let event = &blame_match.event;
+
+                    if format == "json" {
+                        let result = serde_json::json!({
+                            "file": file,
+                            "line": line,
+                            "event_id": event.id,
+                            "timestamp": event.timestamp,
+                            "tool_name": event.tool_name,
+                            "operation": event.operation,
+                            "session_id": event.session_id,
+                            "diff_summary": event.diff_summary,
+                            "confidence": blame_match.confidence.to_uppercase(),
+                            "match_type": blame_match.match_type,
+                            "similarity": blame_match.similarity,
+                            "intent": blame_match.intent
+                        });
+                        println!("{}", serde_json::to_string_pretty(&result).unwrap());
+                    } else {
+                        println!("Diachron Blame");
+                        println!("==============\n");
+                        println!("File: {}:{}", file, line);
+
+                        let confidence_emoji = match blame_match.confidence.as_str() {
+                            "high" => "🎯",
+                            "medium" => "📊",
+                            "low" => "⚠️",
+                            _ => "❓",
+                        };
+
+                        println!(
+                            "\n{} Confidence: {} ({})",
+                            confidence_emoji,
+                            blame_match.confidence.to_uppercase(),
+                            blame_match.match_type
+                        );
+                        println!(
+                            "📍 Source: Claude Code (Session {})",
+                            event.session_id.as_deref().unwrap_or("unknown")
+                        );
+                        println!(
+                            "⏰ When: {}",
+                            event.timestamp_display.as_deref().unwrap_or(&event.timestamp)
+                        );
+                        println!(
+                            "🔧 Tool: {} ({})",
+                            event.tool_name,
+                            event.operation.as_deref().unwrap_or("-")
+                        );
+                        if let Some(ref diff) = event.diff_summary {
+                            println!("📝 Changes: {}", diff);
+                        }
+                        if let Some(ref intent) = blame_match.intent {
+                            println!("💬 Intent: \"{}\"", intent);
+                        }
+                    }
+                }
+                Ok(IpcResponse::BlameNotFound { reason }) => {
+                    if format == "json" {
+                        let result = serde_json::json!({
+                            "file": file,
+                            "line": line,
+                            "error": "not_found",
+                            "reason": reason
+                        });
+                        println!("{}", serde_json::to_string_pretty(&result).unwrap());
+                    } else {
+                        println!("Diachron Blame");
+                        println!("==============\n");
+                        println!("File: {}:{}", file, line);
+                        println!("\n⚠️ {}", reason);
+                    }
+                }
+                Ok(IpcResponse::Error(e)) => {
+                    eprintln!("Error: {}", e);
+                    std::process::exit(1);
+                }
+                Ok(_) => {
+                    eprintln!("Unexpected response from daemon");
+                    std::process::exit(1);
+                }
+                Err(e) => {
+                    eprintln!("Failed to communicate with daemon: {}", e);
+                    eprintln!("Is the daemon running? Try: diachron daemon start");
+                    std::process::exit(1);
+                }
+            }
+        }
     }
 
     Ok(())
@@ -957,6 +1633,49 @@ fn parse_toml_value(s: &str) -> toml::Value {
     }
     // Default to string
     toml::Value::String(s.to_string())
+}
+
+/// Parse a time filter string into (start_time, end_time) ISO timestamps.
+///
+/// Supports formats:
+/// - "1h", "2d", "7d" - relative from now
+/// - "2024-01-01" - absolute date (assumes midnight)
+/// - ISO timestamp
+fn parse_time_range(since: &str) -> (String, String) {
+    use chrono::{Duration, NaiveDate, Utc};
+
+    let now = Utc::now();
+    let end_time = now.format("%Y-%m-%dT%H:%M:%S").to_string();
+
+    // Try relative time (e.g., "1h", "7d")
+    if let Some(stripped) = since.strip_suffix('h') {
+        if let Ok(hours) = stripped.parse::<i64>() {
+            let start = now - Duration::hours(hours);
+            return (start.format("%Y-%m-%dT%H:%M:%S").to_string(), end_time);
+        }
+    }
+
+    if let Some(stripped) = since.strip_suffix('d') {
+        if let Ok(days) = stripped.parse::<i64>() {
+            let start = now - Duration::days(days);
+            return (start.format("%Y-%m-%dT%H:%M:%S").to_string(), end_time);
+        }
+    }
+
+    // Try date (e.g., "2024-01-01")
+    if let Ok(date) = NaiveDate::parse_from_str(since, "%Y-%m-%d") {
+        let start = date.and_hms_opt(0, 0, 0).unwrap();
+        return (start.format("%Y-%m-%dT%H:%M:%S").to_string(), end_time);
+    }
+
+    // Try full ISO timestamp
+    if since.contains('T') {
+        return (since.to_string(), end_time);
+    }
+
+    // Default: last 7 days
+    let start = now - Duration::days(7);
+    (start.format("%Y-%m-%dT%H:%M:%S").to_string(), end_time)
 }
 
 /// Format search results for context injection at session start.

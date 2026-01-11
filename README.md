@@ -1,6 +1,6 @@
 # Diachron
 
-[![Version](https://img.shields.io/badge/version-0.1.0-blue.svg)](https://github.com/wolfiesch/diachron)
+[![Version](https://img.shields.io/badge/version-0.7.0-blue.svg)](https://github.com/wolfiesch/diachron)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey.svg)]()
 [![Claude Code](https://img.shields.io/badge/Claude%20Code-2.1%2B-orange.svg)]()
@@ -46,8 +46,12 @@ Diachron uses **Claude Code 2.1's hook architecture** to transparently capture e
 
 - **Automatic Capture** - Every Write, Edit, and Bash command logged
 - **Git Integration** - Captures branch name and commit SHAs
+- **Hash-Chain Integrity** - SHA256 tamper-evidence for every event (v0.3)
+- **PR Narratives** - Generate evidence packs for pull request comments (v0.3)
+- **Semantic Blame** - Find which AI session wrote specific code lines (v0.3)
 - **Semantic Bash Parsing** - Categories: git, test, build, deploy, file_ops
-- **AI Summaries** - On-demand summaries via OpenAI (optional)
+- **AI Summaries** - On-demand summaries via Anthropic Claude API (optional)
+- **Multi-Assistant Support** - Track Codex CLI alongside Claude Code (v0.7)
 - **Fast** - Rust hook adds only ~12ms latency per operation
 - **Privacy-First** - All data stored locally, never uploaded
 
@@ -109,8 +113,18 @@ See [INSTALL.md](./INSTALL.md) for complete manual installation instructions.
 | `/diachron config` | View/edit configuration |
 | `/timeline` | View change timeline |
 | `/timeline --stats` | Show database statistics |
-| `/timeline --summarize` | Generate AI summaries (requires OpenAI API key) |
+| `/timeline --watch` | Watch for new events in real-time (Ctrl+C to stop) |
+| `/timeline --summarize` | Generate AI summaries (requires ANTHROPIC_API_KEY) |
 | `/timeline --export markdown` | Export to TIMELINE.md |
+
+### v0.3 Commands
+
+| Command | Description |
+|---------|-------------|
+| `diachron verify` | Verify hash chain integrity |
+| `diachron export-evidence` | Generate JSON evidence pack |
+| `diachron pr-comment --pr <N>` | Post PR narrative comment via `gh` CLI |
+| `diachron blame <file:line>` | Semantic blame for a code line |
 
 ## Timeline Output
 
@@ -173,6 +187,108 @@ See [INSTALL.md](./INSTALL.md) for complete manual installation instructions.
 /timeline --export json
 ```
 
+## v0.3: Trust & Verification
+
+### Hash-Chain Verification
+
+Every event is cryptographically linked to the previous event using SHA256:
+
+```bash
+$ diachron verify
+✅ Chain integrity verified
+   Events: 296 (12 checkpoints)
+   First event: 2026-01-01 00:00:00
+   Last event: 2026-01-11 00:45:00
+   Chain root: 8f3a2b...
+```
+
+If tampering is detected:
+```bash
+$ diachron verify
+❌ Chain broken at event #142
+   Expected: 8f3a2b...
+   Actual: deadbeef...
+   Timestamp: 2026-01-10 14:30:00
+```
+
+### PR Narrative Generation
+
+Generate evidence packs showing which AI sessions contributed to a PR:
+
+```bash
+# Export evidence to JSON
+$ diachron export-evidence --output diachron.evidence.json
+
+# Post comment directly to PR (requires gh CLI)
+$ diachron pr-comment --pr 142
+```
+
+Example PR comment:
+```markdown
+## PR #142: AI Provenance Evidence
+
+### Intent
+> Fix the 401 errors on page refresh
+
+### What Changed
+- **Files modified**: 2
+- **Lines**: +45 / -10
+- **Tool operations**: 3
+- **Sessions**: 1
+
+### Evidence Trail
+- **Coverage**: 100.0% of events matched to commits
+
+**Commit `abc1234`**: Fix OAuth2 refresh (HIGH)
+  - `Write` create → src/auth.rs
+  - `Edit` modify → src/auth.rs
+
+### Verification
+- [x] Hash chain integrity
+- [x] Tests executed after changes
+- [x] Build succeeded
+- [ ] Human review
+```
+
+### Semantic Blame (v0.4 Preview)
+
+Find which AI session wrote specific code:
+
+```bash
+$ diachron blame src/auth/login.ts:42
+
+Line 42: const token = await refreshToken(user.id);
+
+📍 Source: Claude Code (Session abc123)
+⏰ When: 01/10/2026 10:32 AM PST
+💬 Intent: "Fix the 401 errors on page refresh"
+📊 Confidence: HIGH (explicit tool call linkage)
+```
+
+Use `--json` for CI/IDE integration:
+```bash
+$ diachron blame src/auth/login.ts:42 --json | jq
+```
+
+### GitHub Action
+
+Automatically post evidence to PRs:
+
+```yaml
+# .github/workflows/diachron.yml
+name: Diachron PR Narrative
+on: [pull_request]
+
+jobs:
+  post-evidence:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: wolfiesch/diachron/github-action@main
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+```
+
 ## Configuration
 
 Edit `.diachron/config.json`:
@@ -194,7 +310,7 @@ Edit `.diachron/config.json`:
 2. **Context Extraction** - Captures file path, operation, git branch, and diff summary
 3. **SQLite Storage** - Events stored in `.diachron/events.db` for fast querying
 4. **Timeline Generation** - Query by time, file, or tool to see your project's history
-5. **AI Summaries** - Optional on-demand summaries via OpenAI gpt-4o-mini
+5. **AI Summaries** - Optional on-demand summaries via Anthropic Claude Haiku
 
 ## Requirements
 
@@ -205,7 +321,7 @@ Edit `.diachron/config.json`:
 | macOS/Linux | Any | Windows is untested |
 
 **Optional:**
-- OpenAI API key (for AI-powered summaries via `/timeline --summarize`)
+- Anthropic API key (for AI-powered summaries via `/timeline --summarize`)
 - Rust 1.70+ (only if building from source)
 
 ## Performance
@@ -252,11 +368,63 @@ install.sh --doctor     # Run diagnostics
 install.sh --uninstall  # Remove completely
 ```
 
+## Multi-Assistant Support (v0.7)
+
+Diachron can track file changes from multiple AI assistants, not just Claude Code. Currently supported:
+
+### OpenAI Codex CLI
+
+#### Via `/handoffcodex` (Recommended)
+
+When using Claude Code's `/handoffcodex` skill to delegate work to Codex, provenance is captured automatically after execution completes. Events appear in your timeline with `tool_name: "Codex"`.
+
+#### Standalone Wrapper
+
+For direct Codex usage without Claude Code orchestration:
+
+```bash
+# Build the wrapper
+cd ~/.claude/skills/diachron/rust
+cargo build --release -p diachron-codex
+
+# Use instead of `codex exec`
+diachron-codex exec "implement the login feature"
+```
+
+This transparently wraps Codex, capturing all file operations to Diachron.
+
+#### Manual Capture
+
+To capture a completed Codex session manually:
+
+```bash
+# Capture most recent Codex session
+python3 ~/.claude/skills/diachron/lib/codex_capture.py --latest
+
+# With git branch correlation
+python3 ~/.claude/skills/diachron/lib/codex_capture.py --latest --git-branch "feature/auth"
+
+# Preview without sending to daemon
+python3 ~/.claude/skills/diachron/lib/codex_capture.py --latest --dry-run --verbose
+```
+
+### Future Assistants
+
+The IPC API (see `docs/IPC-API.md`) enables community integrations for:
+- **Cursor** - Hook into Cursor's file modification events
+- **GitHub Copilot** - VS Code extension integration
+- **Aider** - Parse session logs similar to Codex
+
 ## Roadmap
 
-- [x] ~~AI-powered change summaries~~
-- [x] ~~Git branch/commit correlation~~
-- [x] ~~Semantic Bash command parsing~~
+- [x] ~~AI-powered change summaries~~ (v0.1)
+- [x] ~~Git branch/commit correlation~~ (v0.1)
+- [x] ~~Semantic Bash command parsing~~ (v0.1)
+- [x] ~~Semantic search + conversation memory~~ (v0.2)
+- [x] ~~Hash-chain tamper evidence~~ (v0.3)
+- [x] ~~PR narrative generation~~ (v0.3)
+- [x] ~~Semantic blame~~ (v0.3/v0.4 preview)
+- [x] ~~Multi-assistant support (Codex)~~ (v0.7)
 - [ ] Web dashboard visualization
 - [ ] Team sync (cloud option)
 - [ ] VS Code extension

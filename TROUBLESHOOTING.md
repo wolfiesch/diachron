@@ -232,26 +232,38 @@ mv events.db.backup events.db
 
 **Symptom:** `/timeline --summarize` fails or shows "API error".
 
-#### A. Missing OpenAI API Key
+#### A. Missing Anthropic API Key
+
+The Rust daemon uses Anthropic's Claude API for summarization:
 
 ```bash
 # Check if key is set
-echo $OPENAI_API_KEY
+echo $ANTHROPIC_API_KEY
 
 # Set it if missing
-export OPENAI_API_KEY="sk-..."
+export ANTHROPIC_API_KEY="sk-ant-..."
 ```
 
 Add to your shell profile (`~/.zshrc` or `~/.bashrc`):
 
 ```bash
-export OPENAI_API_KEY="sk-your-key-here"
+export ANTHROPIC_API_KEY="sk-ant-your-key-here"
 ```
 
-#### B. OpenAI Package Not Installed
+Alternatively, add to `~/.diachron/config.toml`:
+
+```toml
+[summarization]
+anthropic_api_key = "sk-ant-your-key-here"
+```
+
+#### B. Daemon Not Running
+
+The Rust daemon handles summarization. Make sure it's running:
 
 ```bash
-pip3 install openai
+diachron doctor  # Check status
+diachron daemon start  # Start if needed
 ```
 
 #### C. API Rate Limits
